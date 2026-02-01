@@ -1,0 +1,18 @@
+# Assets/Plugins/Android/proguard-user.txt
+
+# Keep DJI SDK classes
+-keep class dji.** { *; }
+-dontwarn dji.**
+-keepattributes *Annotation*, InnerClasses, EnclosingMethod
+
+# Keep your plugin package
+-keep class com.sok9hu.djibridge.** { *; }
+-dontwarn com.sok9hu.djibridge.**
+
+# Gson reflection
+-keep class com.google.gson.** { *; }
+-dontwarn com.google.gson.**
+
+# Helper
+-keep class com.cySdkyc.clx.** { *; }
+-dontwarn com.cySdkyc.clx.**

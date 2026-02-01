@@ -1,0 +1,25 @@
+// ============================
+// Unity 6000.x – Base Gradle Template
+// ============================
+// Uses Android Gradle Plugin 8.12.3 (requires Gradle 8.13+)
+
+plugins {
+    // Core Android Gradle plugins
+    id 'com.android.application' version '8.12.3' apply false
+    id 'com.android.library'     version '8.12.3' apply false
+
+    // Unity build-script placeholder (do not remove)
+    **BUILD_SCRIPT_DEPS**
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+// Clean task
+tasks.register("clean", Delete) {
+    delete rootProject.layout.buildDirectory
+}

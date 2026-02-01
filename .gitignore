@@ -1,0 +1,80 @@
+# =========================
+# Unity generated folders
+# =========================
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Mm]emoryCaptures/
+
+# Local user settings
+[Uu]ser[Ss]ettings/
+
+# Asset meta cache
+[Aa]ssets/**/AssetStoreTools*
+
+# =========================
+# Unity auto-backups / warnings
+# =========================
+DJIUnity_BackUpThisFolder_ButDontShipItWithYourGame/
+DJIUnity_BurstDebugInformation_DoNotShip/
+
+# =========================
+# Visual Studio / Rider / VSCode
+# =========================
+.vs/
+.vscode/
+.idea/
+*.csproj
+*.sln
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+
+# =========================
+# OS generated files
+# =========================
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# =========================
+# Builds & binaries
+# =========================
+*.apk
+*.aab
+*.exe
+*.app
+*.unitypackage
+
+# IL2CPP / symbols
+*.symbols.zip
+*.pdb
+
+# =========================
+# Logs & temp files
+# =========================
+*.log
+*.tmp
+*.bak
+*.swp
+
+# =========================
+# Crash reports
+# =========================
+sysinfo.txt
+
+# =========================
+# Addressables cache
+# =========================
+AddressableAssetsData/*/UnityAddressables*
+.utmp/
+.vsconfig
