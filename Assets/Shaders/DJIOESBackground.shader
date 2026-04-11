@@ -29,6 +29,7 @@ Shader "DJI/OESBackgroundURP"
             #endif
 
             uniform float _FlipY;
+            uniform mat4 _TexTransform;
 
             #ifdef VERTEX
             varying vec2 textureCoord;
@@ -43,8 +44,9 @@ Shader "DJI/OESBackgroundURP"
                 gl_Position = vec4(uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
 
                 // UVs: keep 0..2 at verts; inside screen it interpolates to 0..1
-                if (_FlipY > 0.5) uv.y = 2.0 - uv.y;
-                textureCoord = uv * 0.5; // convert 0..2 -> 0..1
+                vec2 sampleUv = uv;
+                if (_FlipY > 0.5) sampleUv.y = 1.0 - sampleUv.y;
+                textureCoord = (_TexTransform * vec4(sampleUv, 0.0, 1.0)).xy;
             }
             #endif
 

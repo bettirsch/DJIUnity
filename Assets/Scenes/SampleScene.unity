@@ -272,6 +272,7 @@ MonoBehaviour:
   backgroundMat: {fileID: 2100000, guid: 2fc284ccb4df3ba48a81fbf8d1c7b3c4, type: 2}
   streamWidth: 1920
   streamHeight: 1080
+  extraFlipY: 1
   driveUpdateFromUpdate: 0
   verboseLogs: 1
 --- !u!1 &410087039

@@ -10,6 +10,7 @@ public sealed class DJIGPUBackground : MonoBehaviour
     [DllImport("djiunity")] private static extern IntPtr DJI_GetRenderEventFunc();
     [DllImport("djiunity")] private static extern void DJI_BeginCreateOESTexture(int reqW, int reqH);
     [DllImport("djiunity")] private static extern int DJI_GetTextureId();
+    [DllImport("djiunity")] private static extern void DJI_GetSurfaceTextureTransform([Out] float[] outMatrix16);
     [DllImport("djiunity")] private static extern void DJI_SetSurfaceTexture(IntPtr surfaceTex);
     [DllImport("djiunity")] private static extern void DJI_ClearSurfaceTexture();
 #endif
@@ -24,6 +25,9 @@ public sealed class DJIGPUBackground : MonoBehaviour
 
     [Tooltip("Requested OES texture height. Must match what your native + decoder pipeline expects.")]
     public int streamHeight = 1080;
+
+    [Tooltip("Apply an extra Y flip after the SurfaceTexture transform. Usually keep this off.")]
+    public bool extraFlipY = true;
 
     [Header("Update Driving")]
     [Tooltip("If you use a URP Renderer Feature to call TryLatchOnRenderThread() every frame, leave this OFF.")]
@@ -69,14 +73,14 @@ public sealed class DJIGPUBackground : MonoBehaviour
         if (m.HasProperty(_PID_External)) m.SetTexture(_PID_External, _unityTex);
 
         // Safe fallbacks in case shader uses a different name.
-        if (m.HasProperty(_PID_MainTex))  m.SetTexture(_PID_MainTex,  _unityTex);
-        if (m.HasProperty(_PID_BaseMap))  m.SetTexture(_PID_BaseMap,  _unityTex);
+        if (m.HasProperty(_PID_MainTex)) m.SetTexture(_PID_MainTex, _unityTex);
+        if (m.HasProperty(_PID_BaseMap)) m.SetTexture(_PID_BaseMap, _unityTex);
         if (m.HasProperty(_PID_ExternalTex)) m.SetTexture(_PID_ExternalTex, _unityTex);
-        if (m.HasProperty(_PID_OESTex))   m.SetTexture(_PID_OESTex,   _unityTex);
+        if (m.HasProperty(_PID_OESTex)) m.SetTexture(_PID_OESTex, _unityTex);
         if (m.HasProperty(_PID_OESTexture)) m.SetTexture(_PID_OESTexture, _unityTex);
 
-        // Your inspector shows "Flip Y" -> likely _FlipY
-        if (m.HasProperty(_PID_FlipY)) m.SetFloat(_PID_FlipY, 1f);
+        if (m.HasProperty(_PID_FlipY)) m.SetFloat(_PID_FlipY, extraFlipY ? 1f : 0f);
+        m.SetMatrix(_PID_TexTransform, GetSurfaceTextureTransformMatrix());
 #endif
     }
 
@@ -118,11 +122,13 @@ public sealed class DJIGPUBackground : MonoBehaviour
     private static readonly int _PID_MainTex = Shader.PropertyToID("_MainTex");
     private static readonly int _PID_BaseMap = Shader.PropertyToID("_BaseMap");
     private static readonly int _PID_FlipY = Shader.PropertyToID("_FlipY");
+    private static readonly int _PID_TexTransform = Shader.PropertyToID("_TexTransform");
 
 #if UNITY_ANDROID && !UNITY_EDITOR
     private AndroidJavaObject _surfaceTexture;
     private AndroidJavaObject _surface;
     private Texture2D _unityTex;
+    private readonly float[] _surfaceTextureTransform = new float[16];
 #endif
 
     private static IntPtr _renderEventFunc = IntPtr.Zero;
@@ -317,6 +323,31 @@ public sealed class DJIGPUBackground : MonoBehaviour
                 Debug.LogWarning("[DJI] setOnFrameAvailableListener failed: " + e.Message);
             return false;
         }
+    }
+
+    private Matrix4x4 GetSurfaceTextureTransformMatrix()
+    {
+        try
+        {
+            DJI_GetSurfaceTextureTransform(_surfaceTextureTransform);
+        }
+        catch (Exception e)
+        {
+            if (verboseLogs)
+                Debug.LogWarning("[DJI] DJI_GetSurfaceTextureTransform failed: " + e.Message);
+            return Matrix4x4.identity;
+        }
+
+        var matrix = Matrix4x4.identity;
+        for (int row = 0; row < 4; row++)
+        {
+            for (int col = 0; col < 4; col++)
+            {
+                matrix[row, col] = _surfaceTextureTransform[col * 4 + row];
+            }
+        }
+
+        return matrix;
     }
 
     private void Update()
