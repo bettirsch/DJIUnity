@@ -1,6 +1,6 @@
 # DJIUnity
 
-Main Unity Android application that consumes the `DJIBridge` and `DJIUnityNative` plugins.
+Main Unity Android application that consumes the `DJIBridge` plugin.
 
 ---
 
@@ -9,7 +9,7 @@ Main Unity Android application that consumes the `DJIBridge` and `DJIUnityNative
 `DJIUnity` is the app that runs on the Android phone. It:
 
 - initializes the Android-side DJI plugin from Unity
-- receives the external video texture from the native plugin
+- receives the external video texture from the native plugin bundled into `DJIBridge`
 - renders the DJI live feed inside Unity
 
 ---
@@ -22,10 +22,11 @@ Expected Android plugins in:
 Assets/Plugins/Android/
 ```
 
-Required files:
+Required file:
 
 - `DJIUnityBridge.aar`
-- `DJIUnityNative-release.aar`
+
+The `djiunity` native render plugin is now bundled inside `DJIUnityBridge.aar`, so the old standalone `DJIUnityNative-release.aar` should not be kept in the plugin folder.
 
 ---
 
@@ -49,7 +50,7 @@ If it does not match, DJI SDK registration fails and the app will not receive th
 
 ## DJI API Key Note
 
-The DJI API key is no longer stored in Unity project files.
+The DJI API key is not stored in Unity project files.
 
 It is injected from the `DJIBridge` project during the Android AAR build, using:
 
