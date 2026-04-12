@@ -61,24 +61,14 @@ public sealed class DJIGPUBackground : MonoBehaviour
 
     /// <summary>
     /// Bind the current external texture to the given material.
-    /// This is the "perfect" place to match your shader property names.
+    /// The current URP background shader expects _MainTex, _FlipY and _TexTransform.
     /// </summary>
     public void ApplyToMaterial(Material m)
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (m == null || _unityTex == null) return;
 
-        // Your shader inspector shows a texture slot named "External"
-        // -> very likely property is _External.
-        if (m.HasProperty(_PID_External)) m.SetTexture(_PID_External, _unityTex);
-
-        // Safe fallbacks in case shader uses a different name.
         if (m.HasProperty(_PID_MainTex)) m.SetTexture(_PID_MainTex, _unityTex);
-        if (m.HasProperty(_PID_BaseMap)) m.SetTexture(_PID_BaseMap, _unityTex);
-        if (m.HasProperty(_PID_ExternalTex)) m.SetTexture(_PID_ExternalTex, _unityTex);
-        if (m.HasProperty(_PID_OESTex)) m.SetTexture(_PID_OESTex, _unityTex);
-        if (m.HasProperty(_PID_OESTexture)) m.SetTexture(_PID_OESTexture, _unityTex);
-
         if (m.HasProperty(_PID_FlipY)) m.SetFloat(_PID_FlipY, extraFlipY ? 1f : 0f);
         m.SetMatrix(_PID_TexTransform, GetSurfaceTextureTransformMatrix());
 #endif
@@ -115,12 +105,7 @@ public sealed class DJIGPUBackground : MonoBehaviour
     private const int EVT_DESTROY = 3;
 
     // Shader property IDs (fast + typo-resistant)
-    private static readonly int _PID_External = Shader.PropertyToID("_External");
-    private static readonly int _PID_ExternalTex = Shader.PropertyToID("_ExternalTex");
-    private static readonly int _PID_OESTex = Shader.PropertyToID("_OESTex");
-    private static readonly int _PID_OESTexture = Shader.PropertyToID("_OESTexture");
     private static readonly int _PID_MainTex = Shader.PropertyToID("_MainTex");
-    private static readonly int _PID_BaseMap = Shader.PropertyToID("_BaseMap");
     private static readonly int _PID_FlipY = Shader.PropertyToID("_FlipY");
     private static readonly int _PID_TexTransform = Shader.PropertyToID("_TexTransform");
 
@@ -391,9 +376,8 @@ public sealed class DJIGPUBackground : MonoBehaviour
         // (cheap, safe; remove if you don't want it)
         if (_lifecycleState == LifecycleState.Running && backgroundMat != null && _unityTex != null)
         {
-            // Ensure _External is set (some pipelines may recreate material instances)
-            if (backgroundMat.HasProperty(_PID_External) && backgroundMat.GetTexture(_PID_External) != _unityTex)
-                backgroundMat.SetTexture(_PID_External, _unityTex);
+            if (backgroundMat.GetTexture(_PID_MainTex) != _unityTex)
+                backgroundMat.SetTexture(_PID_MainTex, _unityTex);
         }
     }
 
