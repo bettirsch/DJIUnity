@@ -41,7 +41,7 @@ public sealed class DJIGPUBackground : MonoBehaviour
     public static DJIGPUBackground Instance { get; private set; }
 
     /// <summary> True once OES texture + SurfaceTexture + decoder surface are set. </summary>
-    public bool IsReady => _ready;
+    public bool IsReady => _lifecycleState == LifecycleState.Running;
 
     /// <summary> The Unity external texture wrapping the OES texture. </summary>
     public Texture ExternalTexture
@@ -93,7 +93,7 @@ public sealed class DJIGPUBackground : MonoBehaviour
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
         var bg = Instance;
-        if (bg == null || !bg._ready) return;
+        if (bg == null || bg._lifecycleState != LifecycleState.Running) return;
         if (_renderEventFunc == IntPtr.Zero) return;
 
         if (_useFrameGate)
@@ -133,11 +133,11 @@ public sealed class DJIGPUBackground : MonoBehaviour
 
     private static IntPtr _renderEventFunc = IntPtr.Zero;
 
-    private bool _ready;
-    private bool _initializing;
     private Coroutine _initCo;
-
     private int _texId;
+    private bool _hasApplicationFocus;
+    private bool _isApplicationPaused;
+    private LifecycleState _lifecycleState = LifecycleState.Inactive;
 
     // FrameAvailable gating:
     // 0 = no new frame pending, 1 = new frame pending.
@@ -145,6 +145,14 @@ public sealed class DJIGPUBackground : MonoBehaviour
 
     // If frame listener registration fails, we fall back to "always update".
     private static bool _useFrameGate = true;
+
+    private enum LifecycleState
+    {
+        Inactive,
+        WaitingForActivation,
+        Initializing,
+        Running
+    }
 
     private sealed class FrameListener : AndroidJavaProxy
     {
@@ -168,6 +176,8 @@ public sealed class DJIGPUBackground : MonoBehaviour
         Instance = this;
 
 #if UNITY_ANDROID && !UNITY_EDITOR
+        _hasApplicationFocus = Application.isFocused;
+
         try
         {
             _renderEventFunc = DJI_GetRenderEventFunc();
@@ -195,28 +205,47 @@ public sealed class DJIGPUBackground : MonoBehaviour
             yield break;
         }
 
-        _initCo = StartCoroutine(InitWhenFocused());
+        SyncLifecycleState("Start");
 #endif
         yield break;
     }
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-    private IEnumerator InitWhenFocused()
+    private bool WantsPipelineRunning => !_isApplicationPaused && (_hasApplicationFocus || Application.isFocused);
+
+    private IEnumerator InitWhenLifecycleActive()
     {
-        while (!Application.isFocused) yield return null;
+        while (!WantsPipelineRunning)
+            yield return null;
+
         yield return InitVideoPipeline();
+        _initCo = null;
     }
 
     private IEnumerator InitVideoPipeline()
     {
-        if (_initializing) yield break;
-        _initializing = true;
+        if (_lifecycleState == LifecycleState.Initializing || _lifecycleState == LifecycleState.Running)
+            yield break;
+
+        SetLifecycleState(LifecycleState.Initializing);
 
         // Ensure old resources are gone
-        TeardownVideoPipeline(stopJavaDecoder: true);
+        TeardownVideoPipeline(stopJavaDecoder: true, LifecycleState.Initializing);
+
+        if (!WantsPipelineRunning)
+        {
+            SetLifecycleState(LifecycleState.Inactive);
+            yield break;
+        }
 
         // Give Unity one frame to ensure a valid GL context after resume/focus.
         yield return new WaitForEndOfFrame();
+
+        if (!WantsPipelineRunning)
+        {
+            SetLifecycleState(LifecycleState.Inactive);
+            yield break;
+        }
 
         // 1) Ask native to create OES texture on render thread
         DJI_BeginCreateOESTexture(streamWidth, streamHeight);
@@ -233,7 +262,7 @@ public sealed class DJIGPUBackground : MonoBehaviour
         if (_texId == 0)
         {
             Debug.LogError("[DJI] Failed to create OES texture.");
-            _initializing = false;
+            SetLifecycleState(LifecycleState.Inactive);
             yield break;
         }
 
@@ -283,8 +312,7 @@ public sealed class DJIGPUBackground : MonoBehaviour
         // 6) Bind it to the material’s *correct* property (External)
         ApplyToMaterial(backgroundMat);
 
-        _ready = true;
-        _initializing = false;
+        SetLifecycleState(LifecycleState.Running);
 
         if (verboseLogs)
             Debug.Log($"[DJI] Video pipeline ready. texId={_texId} frameGate={_useFrameGate} driveUpdateFromUpdate={driveUpdateFromUpdate}");
@@ -354,14 +382,14 @@ public sealed class DJIGPUBackground : MonoBehaviour
     {
         // Legacy path: drive latching from Update().
         // Safe even if URP pass is also enabled, because TryLatchOnRenderThread() consumes the frame flag once.
-        if (driveUpdateFromUpdate && _ready && _renderEventFunc != IntPtr.Zero)
+        if (driveUpdateFromUpdate && _lifecycleState == LifecycleState.Running && _renderEventFunc != IntPtr.Zero)
         {
             TryLatchOnRenderThread();
         }
 
         // If some other script swaps material at runtime, keep it bound.
         // (cheap, safe; remove if you don't want it)
-        if (_ready && backgroundMat != null && _unityTex != null)
+        if (_lifecycleState == LifecycleState.Running && backgroundMat != null && _unityTex != null)
         {
             // Ensure _External is set (some pipelines may recreate material instances)
             if (backgroundMat.HasProperty(_PID_External) && backgroundMat.GetTexture(_PID_External) != _unityTex)
@@ -371,43 +399,53 @@ public sealed class DJIGPUBackground : MonoBehaviour
 
     private void OnApplicationPause(bool pause)
     {
-        if (pause)
-        {
-            if (verboseLogs) Debug.Log("[DJI] OnApplicationPause(true) -> teardown");
-            TeardownVideoPipeline(stopJavaDecoder: true);
-        }
-        else
-        {
-            if (verboseLogs) Debug.Log("[DJI] OnApplicationPause(false) -> re-init");
-            RestartInit();
-        }
+        _isApplicationPaused = pause;
+        SyncLifecycleState($"OnApplicationPause({pause})");
     }
 
     private void OnApplicationFocus(bool focus)
     {
-        if (!focus)
-        {
-            if (verboseLogs) Debug.Log("[DJI] OnApplicationFocus(false) -> teardown");
-            TeardownVideoPipeline(stopJavaDecoder: true);
-        }
-        else
-        {
-            if (verboseLogs) Debug.Log("[DJI] OnApplicationFocus(true) -> re-init");
-            if (!_ready && !_initializing)
-                RestartInit();
-        }
+        _hasApplicationFocus = focus;
+        SyncLifecycleState($"OnApplicationFocus({focus})");
     }
 
-    private void RestartInit()
+    private void SyncLifecycleState(string source)
     {
-        if (_initCo != null) StopCoroutine(_initCo);
-        _initCo = StartCoroutine(InitWhenFocused());
+        if (!WantsPipelineRunning)
+        {
+            if (verboseLogs)
+                Debug.Log($"[DJI] {source} -> inactive (focus={_hasApplicationFocus} paused={_isApplicationPaused})");
+
+            CancelPendingInit();
+            TeardownVideoPipeline(stopJavaDecoder: true, LifecycleState.Inactive);
+            return;
+        }
+
+        if (_lifecycleState == LifecycleState.Running || _lifecycleState == LifecycleState.Initializing || _initCo != null)
+            return;
+
+        if (verboseLogs)
+            Debug.Log($"[DJI] {source} -> scheduling init");
+
+        SetLifecycleState(LifecycleState.WaitingForActivation);
+        _initCo = StartCoroutine(InitWhenLifecycleActive());
     }
 
-    private void TeardownVideoPipeline(bool stopJavaDecoder)
+    private void CancelPendingInit()
     {
-        _ready = false;
-        _initializing = false;
+        if (_initCo == null) return;
+        StopCoroutine(_initCo);
+        _initCo = null;
+    }
+
+    private void SetLifecycleState(LifecycleState newState)
+    {
+        _lifecycleState = newState;
+    }
+
+    private void TeardownVideoPipeline(bool stopJavaDecoder, LifecycleState nextState)
+    {
+        SetLifecycleState(nextState);
 
         Interlocked.Exchange(ref _framePending, 0);
 
@@ -448,7 +486,8 @@ public sealed class DJIGPUBackground : MonoBehaviour
     private void OnDestroy()
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
-        TeardownVideoPipeline(stopJavaDecoder: true);
+        CancelPendingInit();
+        TeardownVideoPipeline(stopJavaDecoder: true, LifecycleState.Inactive);
 #endif
         if (Instance == this) Instance = null;
     }
