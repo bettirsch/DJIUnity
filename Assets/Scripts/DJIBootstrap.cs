@@ -1,24 +1,13 @@
 using UnityEngine;
-using System;
 
 public class DJIBootstrap : MonoBehaviour
 {
     void Start()
     {
-        try
-        {
-            using (var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
-            {
-                var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
-                var app = activity.Call<AndroidJavaObject>("getApplication");
-                using var plugin = new AndroidJavaClass("com.sok9hu.djibridge.DJIPlugin");
-                plugin.CallStatic("init", app);
-            }
-            Debug.Log("DJI plugin initialized successfully.");
-        }
-        catch (Exception e)
-        {
-            Debug.LogError("DJI plugin init failed: " + e);
-        }
+#if UNITY_ANDROID && !UNITY_EDITOR
+        // Kept only as a scene/bootstrap marker. DJI startup now happens earlier from the
+        // Android side via DJIBridge's startup provider, so we avoid a redundant second init here.
+        Debug.Log("DJI bootstrap active; Android-side startup is handled by DJIBridge.");
+#endif
     }
 }
