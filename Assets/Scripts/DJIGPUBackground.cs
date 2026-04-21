@@ -124,12 +124,14 @@ public sealed class DJIGPUBackground : MonoBehaviour
     private bool _isApplicationPaused;
     private LifecycleState _lifecycleState = LifecycleState.Inactive;
 
+#if UNITY_ANDROID && !UNITY_EDITOR
     // FrameAvailable gating:
     // 0 = no new frame pending, 1 = new frame pending.
     private static int _framePending = 0;
 
     // If frame listener registration fails, we fall back to "always update".
     private static bool _useFrameGate = true;
+#endif
 
     private enum LifecycleState
     {
@@ -139,6 +141,7 @@ public sealed class DJIGPUBackground : MonoBehaviour
         Running
     }
 
+#if UNITY_ANDROID && !UNITY_EDITOR
     private sealed class FrameListener : AndroidJavaProxy
     {
         public FrameListener() : base("android.graphics.SurfaceTexture$OnFrameAvailableListener") { }
@@ -149,6 +152,7 @@ public sealed class DJIGPUBackground : MonoBehaviour
             Interlocked.Exchange(ref _framePending, 1);
         }
     }
+#endif
 
     private void Awake()
     {

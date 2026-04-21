@@ -83,6 +83,6 @@ MonoBehaviour:
     backgroundMaterial: {fileID: 2100000, guid: 2fc284ccb4df3ba48a81fbf8d1c7b3c4, type: 2}
     renderPassEvent: 250
     onlyBaseCamera: 1
-    enableLogs: 1
+    enableLogs: 0
     logEveryNFrames: 120
     logTag: '[DJI][DJIBackgroundURPFeature]'

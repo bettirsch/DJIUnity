@@ -24,7 +24,7 @@ public sealed class DJIBackgroundURPFeature : ScriptableRendererFeature
         public bool onlyBaseCamera = true;
 
         [Header("Logging")]
-        public bool enableLogs = true;
+        public bool enableLogs = false;
 
         [Min(1)]
         [Tooltip("Logs once every N frames.")]
@@ -193,8 +193,15 @@ public sealed class DJIBackgroundURPFeature : ScriptableRendererFeature
 
             // Ensure material is bound to external texture property (_External etc.)
             bg.ApplyToMaterial(_mat);
-            var t = _mat.GetTexture("_MainTex");
-            Debug.Log($"{_s.logTag} _MainTex after ApplyToMaterial = {(t ? t.name : "NULL")}");
+            if (_s.enableLogs)
+            {
+                int n = Mathf.Max(1, _s.logEveryNFrames);
+                if ((Time.frameCount % n) == 0)
+                {
+                    var t = _mat.GetTexture("_MainTex");
+                    Debug.Log($"{_s.logTag} _MainTex after ApplyToMaterial = {(t ? t.name : "NULL")}");
+                }
+            }
 
             tex = bg.ExternalTexture;
             if (tex == null)
