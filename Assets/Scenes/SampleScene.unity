@@ -132,6 +132,7 @@ GameObject:
   - component: {fileID: 330585544}
   - component: {fileID: 330585547}
   - component: {fileID: 330585548}
+  - component: {fileID: 330585549}
   m_Layer: 0
   m_Name: Main Camera
   m_TagString: MainCamera
@@ -274,7 +275,30 @@ MonoBehaviour:
   streamHeight: 1080
   extraFlipY: 1
   driveUpdateFromUpdate: 0
-  verboseLogs: 1
+  verboseLogs: 0
+--- !u!114 &330585549
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 330585543}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c0d7bb6482a4407883fdf157e2f390e8, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  pollInterval: 0.1
+  verboseLogs: 0
+  applyPosition: 1
+  applyRotation: 1
+  worldScale: 1
+  pitchMultiplier: -1
+  yawMultiplier: 1
+  rollMultiplier: -1
+  yawOffsetDegrees: 0
+  lockOriginToFirstPose: 1
+  estimateGroundPlaneFromRelativeAltitude: 1
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0
@@ -457,6 +481,7 @@ GameObject:
   - component: {fileID: 1964602100}
   - component: {fileID: 1964602099}
   - component: {fileID: 1964602098}
+  - component: {fileID: 1964602102}
   m_Layer: 0
   m_Name: Cube
   m_TagString: Untagged
@@ -553,6 +578,26 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1964602102
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1964602097}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1ccb4ec32ee84a54a80071a5fdd6f615, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  targetCamera: {fileID: 330585545}
+  anchorDistance: 8
+  placeOnStart: 0
+  allowReposition: 1
+  preferGroundPlane: 1
+  hideUntilPlaced: 1
+  faceCamera: 0
+  verboseLogs: 0
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
