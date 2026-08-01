@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Unity.XR.CoreUtils;
@@ -42,6 +43,8 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     [SerializeField] private ARRaycastManager raycastManager;
     [SerializeField] private ARAnchorManager anchorManager;
     [SerializeField] private ARCameraManager arCameraManager;
+    [SerializeField] private ARCameraBackground arCameraBackground;
+    [SerializeField] private DJIGPUBackground djiGpuBackground;
 
     [Header("Optional UI References")]
     [SerializeField] private Canvas overlayCanvas;
@@ -65,6 +68,13 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     [SerializeField] [Min(0.1f)] private float fallbackPlacementDistance = 1.25f;
     [SerializeField] private Vector3 fallbackCubeScale = new Vector3(0.25f, 0.25f, 0.25f);
 
+    [Header("Tracking Startup")]
+    [SerializeField] private bool usePhoneCameraFeedWhileInitializing = true;
+    [SerializeField] [Min(1f)] private float trackingStartupTimeout = 8f;
+    [SerializeField] [Min(0.1f)] private float sessionRestartDelay = 0.75f;
+    [SerializeField] [Range(0, 3)] private int maxAutomaticSessionResets = 1;
+    [SerializeField] private bool restartSessionOnTimestampRegression = true;
+
     [Header("Debug")]
     [SerializeField] private bool verboseLogs;
 
@@ -83,6 +93,15 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     private string _lastStatusMessage;
     private ARSessionState _lastSessionState;
     private NotTrackingReason _lastNotTrackingReason;
+    private bool _trackingEverEstablished;
+    private bool _hasReceivedCameraFrame;
+    private bool _cameraFrameTimestampRegressed;
+    private bool _sessionRestartInProgress;
+    private bool _presentingPhoneCameraFeed;
+    private int _automaticSessionResetCount;
+    private float _currentTrackingAttemptStartedAt;
+    private float _lastCameraFrameReceivedAt;
+    private long? _lastCameraFrameTimestampNs;
 
     private void Awake()
     {
@@ -106,6 +125,12 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
         if (resetButton != null)
             resetButton.onClick.AddListener(OnResetButtonPressed);
+
+        if (arCameraManager != null)
+            arCameraManager.frameReceived += OnCameraFrameReceived;
+
+        BeginTrackingAttempt();
+        ApplyCameraFeedPresentation(force: true);
     }
 
     private void OnDisable()
@@ -115,10 +140,14 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
         if (resetButton != null)
             resetButton.onClick.RemoveListener(OnResetButtonPressed);
+
+        if (arCameraManager != null)
+            arCameraManager.frameReceived -= OnCameraFrameReceived;
     }
 
     private void Update()
     {
+        UpdateTrackingStartup();
         UpdateSessionDiagnostics();
         UpdatePlacementPose();
         RefreshUiState();
@@ -144,6 +173,12 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
         if (arCameraManager == null && targetCamera != null)
             arCameraManager = targetCamera.GetComponent<ARCameraManager>();
 
+        if (arCameraBackground == null && targetCamera != null)
+            arCameraBackground = GetOrAddComponent<ARCameraBackground>(targetCamera.gameObject);
+
+        if (djiGpuBackground == null && targetCamera != null)
+            djiGpuBackground = targetCamera.GetComponent<DJIGPUBackground>();
+
         if (arSession == null)
             arSession = FindAnyObjectByType<ARSession>();
     }
@@ -165,6 +200,8 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
         raycastManager = raycastManager != null ? raycastManager : GetOrAddComponent<ARRaycastManager>(gameObject);
         anchorManager = anchorManager != null ? anchorManager : GetOrAddComponent<ARAnchorManager>(gameObject);
         arCameraManager = arCameraManager != null ? arCameraManager : GetOrAddComponent<ARCameraManager>(targetCamera.gameObject);
+        arCameraBackground = arCameraBackground != null ? arCameraBackground : GetOrAddComponent<ARCameraBackground>(targetCamera.gameObject);
+        djiGpuBackground = djiGpuBackground != null ? djiGpuBackground : targetCamera.GetComponent<DJIGPUBackground>();
 
         if (arSession == null)
         {
@@ -342,6 +379,12 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     private void UpdatePlacementPose()
     {
         if (targetCamera == null)
+        {
+            SetPlacementAvailability(false, default, null, false);
+            return;
+        }
+
+        if (ShouldHoldPlacementUntilTracking())
         {
             SetPlacementAvailability(false, default, null, false);
             return;
@@ -573,6 +616,10 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     {
         var sessionState = ARSession.state;
         var notTrackingReason = ARSession.notTrackingReason;
+
+        if (sessionState == ARSessionState.SessionTracking)
+            _trackingEverEstablished = true;
+
         if (sessionState == _lastSessionState && notTrackingReason == _lastNotTrackingReason)
             return;
 
@@ -587,12 +634,17 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
             );
         }
 
+        ApplyCameraFeedPresentation(force: false);
+
         if (!_hasPlacementPose && !_isCreatingAnchor)
             UpdateStatus(BuildIdleStatusMessage(sessionState, notTrackingReason));
     }
 
     private string BuildIdleStatusMessage(ARSessionState sessionState, NotTrackingReason notTrackingReason)
     {
+        if (ShouldGuideTrackingStartup(sessionState))
+            return BuildTrackingStartupMessage(sessionState, notTrackingReason);
+
         switch (sessionState)
         {
             case ARSessionState.None:
@@ -621,6 +673,196 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
                 return $"AR tracking is not ready yet: {notTrackingReason}.";
         }
+    }
+
+    private void UpdateTrackingStartup()
+    {
+        var sessionState = ARSession.state;
+        ApplyCameraFeedPresentation(force: false);
+
+        if (sessionState == ARSessionState.SessionTracking)
+            return;
+
+        if (_sessionRestartInProgress || maxAutomaticSessionResets <= 0)
+            return;
+
+        if (Time.unscaledTime - _currentTrackingAttemptStartedAt < trackingStartupTimeout)
+            return;
+
+        if (_automaticSessionResetCount >= maxAutomaticSessionResets)
+            return;
+
+        var reason = GetTrackingRestartReason(sessionState);
+        if (reason == null)
+            return;
+
+        StartCoroutine(RestartArSessionAsync(reason));
+    }
+
+    private string GetTrackingRestartReason(ARSessionState sessionState)
+    {
+        if (restartSessionOnTimestampRegression && _cameraFrameTimestampRegressed)
+            return "camera frame timestamps regressed";
+
+        if (!_hasReceivedCameraFrame)
+            return "the camera feed never reached AR Foundation";
+
+        if (sessionState == ARSessionState.SessionInitializing)
+            return "the AR session stayed in initialization too long";
+
+        if (ARSession.notTrackingReason != NotTrackingReason.None)
+            return $"tracking stayed unavailable ({ARSession.notTrackingReason})";
+
+        return "tracking never became active";
+    }
+
+    private IEnumerator RestartArSessionAsync(string reason)
+    {
+        _sessionRestartInProgress = true;
+        _automaticSessionResetCount++;
+        UpdateStatus($"AR tracking got stuck ({reason}). Restarting the AR session once...");
+
+        if (verboseLogs)
+            Debug.LogWarning($"[AR Prototype] Restarting AR session after startup failure: {reason}");
+
+        if (planeManager != null)
+            planeManager.enabled = false;
+
+        if (raycastManager != null)
+            raycastManager.enabled = false;
+
+        if (anchorManager != null)
+            anchorManager.enabled = false;
+
+        if (arSession != null)
+            arSession.enabled = false;
+
+        yield return null;
+        yield return new WaitForSecondsRealtime(sessionRestartDelay);
+
+        ResetTrackingAttemptState();
+        ApplyCameraFeedPresentation(force: true);
+
+        if (arSession != null)
+        {
+            ARSession.Reset();
+            arSession.enabled = true;
+        }
+
+        if (anchorManager != null)
+            anchorManager.enabled = true;
+
+        if (raycastManager != null)
+            raycastManager.enabled = true;
+
+        if (planeManager != null)
+            planeManager.enabled = true;
+
+        UpdateStatus("AR session restarted. Point the phone camera at a textured floor or wall and move slowly.");
+        _sessionRestartInProgress = false;
+    }
+
+    private void OnCameraFrameReceived(ARCameraFrameEventArgs eventArgs)
+    {
+        _hasReceivedCameraFrame = true;
+        _lastCameraFrameReceivedAt = Time.unscaledTime;
+
+        if (!eventArgs.timestampNs.HasValue)
+            return;
+
+        var timestampNs = eventArgs.timestampNs.Value;
+        if (_lastCameraFrameTimestampNs.HasValue && timestampNs <= _lastCameraFrameTimestampNs.Value)
+        {
+            _cameraFrameTimestampRegressed = true;
+
+            if (verboseLogs)
+            {
+                Debug.LogWarning(
+                    $"[AR Prototype] AR camera frame timestamp regressed: current={timestampNs} previous={_lastCameraFrameTimestampNs.Value}"
+                );
+            }
+        }
+
+        _lastCameraFrameTimestampNs = timestampNs;
+    }
+
+    private void BeginTrackingAttempt()
+    {
+        _trackingEverEstablished = ARSession.state == ARSessionState.SessionTracking;
+        ResetTrackingAttemptState();
+    }
+
+    private void ResetTrackingAttemptState()
+    {
+        _currentTrackingAttemptStartedAt = Time.unscaledTime;
+        _hasReceivedCameraFrame = false;
+        _cameraFrameTimestampRegressed = false;
+        _lastCameraFrameTimestampNs = null;
+        _lastCameraFrameReceivedAt = Time.unscaledTime;
+    }
+
+    private void ApplyCameraFeedPresentation(bool force)
+    {
+        if (!usePhoneCameraFeedWhileInitializing)
+            return;
+
+        var shouldPresentPhoneCameraFeed = ShouldGuideTrackingStartup(ARSession.state);
+        if (!force && shouldPresentPhoneCameraFeed == _presentingPhoneCameraFeed)
+            return;
+
+        _presentingPhoneCameraFeed = shouldPresentPhoneCameraFeed;
+
+        if (arCameraBackground != null)
+            arCameraBackground.enabled = shouldPresentPhoneCameraFeed;
+
+        if (djiGpuBackground != null)
+            djiGpuBackground.enabled = !shouldPresentPhoneCameraFeed;
+
+        if (verboseLogs)
+        {
+            Debug.Log(
+                $"[AR Prototype] Camera presentation -> " +
+                $"{(shouldPresentPhoneCameraFeed ? "phone AR camera for tracking startup" : "DJI video feed")}"
+            );
+        }
+    }
+
+    private bool ShouldGuideTrackingStartup(ARSessionState sessionState)
+    {
+        return usePhoneCameraFeedWhileInitializing &&
+            !_trackingEverEstablished &&
+            sessionState != ARSessionState.SessionTracking;
+    }
+
+    private bool ShouldHoldPlacementUntilTracking()
+    {
+        return ShouldGuideTrackingStartup(ARSession.state) &&
+            _automaticSessionResetCount < maxAutomaticSessionResets;
+    }
+
+    private string BuildTrackingStartupMessage(ARSessionState sessionState, NotTrackingReason notTrackingReason)
+    {
+        if (_sessionRestartInProgress)
+            return "Restarting the AR session. Keep the phone pointed at a textured real-world surface.";
+
+        var baseMessage = sessionState switch
+        {
+            ARSessionState.CheckingAvailability => "Checking ARCore availability.",
+            ARSessionState.NeedsInstall => "ARCore needs to be installed or updated.",
+            ARSessionState.Installing => "Installing or updating ARCore.",
+            ARSessionState.Unsupported => "This device does not report ARCore support.",
+            ARSessionState.Ready => "ARCore is ready. Point the phone camera at a textured floor or wall and move slowly.",
+            ARSessionState.SessionInitializing => "Starting AR tracking. Point the phone camera at a textured floor or wall and move slowly.",
+            _ => "Point the phone camera at a textured floor or wall and move slowly until tracking starts."
+        };
+
+        if (!_hasReceivedCameraFrame && sessionState != ARSessionState.CheckingAvailability)
+            return baseMessage + " Waiting for the first AR camera frame.";
+
+        if (notTrackingReason != NotTrackingReason.None)
+            return baseMessage + $" Current ARCore state: {notTrackingReason}.";
+
+        return baseMessage;
     }
 
     private bool TryGetFallbackPlacementPose(out Pose pose)

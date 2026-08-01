@@ -50,6 +50,7 @@ public static class ScenePersistedARPlacementSetup
         var arSession = ConfigureArSession();
         ConfigureXrManagement();
         var arCameraManager = GetOrAddComponent<ARCameraManager>(mainCamera.gameObject);
+        var arCameraBackground = GetOrAddComponent<ARCameraBackground>(mainCamera.gameObject);
         var trackedPoseDriver = GetOrAddComponent<TrackedPoseDriver>(mainCamera.gameObject);
         ConfigureTrackedPoseDriver(trackedPoseDriver);
 
@@ -81,6 +82,8 @@ public static class ScenePersistedARPlacementSetup
             raycastManager,
             anchorManager,
             arCameraManager,
+            arCameraBackground,
+            mainCamera.GetComponent<DJIGPUBackground>(),
             overlayCanvas,
             placeButton,
             resetButton,
@@ -360,6 +363,8 @@ public static class ScenePersistedARPlacementSetup
         ARRaycastManager raycastManager,
         ARAnchorManager anchorManager,
         ARCameraManager arCameraManager,
+        ARCameraBackground arCameraBackground,
+        DJIGPUBackground djiGpuBackground,
         Canvas overlayCanvas,
         Button placeButton,
         Button resetButton,
@@ -377,6 +382,8 @@ public static class ScenePersistedARPlacementSetup
         serializedObject.FindProperty("raycastManager").objectReferenceValue = raycastManager;
         serializedObject.FindProperty("anchorManager").objectReferenceValue = anchorManager;
         serializedObject.FindProperty("arCameraManager").objectReferenceValue = arCameraManager;
+        serializedObject.FindProperty("arCameraBackground").objectReferenceValue = arCameraBackground;
+        serializedObject.FindProperty("djiGpuBackground").objectReferenceValue = djiGpuBackground;
         serializedObject.FindProperty("overlayCanvas").objectReferenceValue = overlayCanvas;
         serializedObject.FindProperty("placeButton").objectReferenceValue = placeButton;
         serializedObject.FindProperty("resetButton").objectReferenceValue = resetButton;
