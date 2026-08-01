@@ -32,6 +32,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     private const string CanvasName = "AR Placement Canvas";
     private const string IndicatorName = "AR Placement Indicator";
     private const string FallbackCubeName = "Prototype Dummy Cube";
+    private const string FallbackPlacementRootName = "Prototype Placement Root";
 
     [Header("Scene References")]
     [SerializeField] private Camera targetCamera;
@@ -57,9 +58,11 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
     [Header("Placement")]
     [SerializeField] private bool autoCreateSceneDependencies = true;
+    [SerializeField] private bool allowPlacementWithoutPlane = true;
     [SerializeField] private bool preferPlaneAttachedAnchorWhenAvailable;
     [SerializeField] [Min(0f)] private float indicatorSurfaceOffset = 0.01f;
     [SerializeField] [Min(0f)] private float placedObjectSurfacePadding = 0.01f;
+    [SerializeField] [Min(0.1f)] private float fallbackPlacementDistance = 1.25f;
     [SerializeField] private Vector3 fallbackCubeScale = new Vector3(0.25f, 0.25f, 0.25f);
 
     [Header("Debug")]
@@ -74,8 +77,12 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     private Pose _currentPlacementPose;
     private ARPlane _currentPlacementPlane;
     private bool _hasPlacementPose;
+    private bool _isFallbackPlacementPose;
     private bool _isCreatingAnchor;
     private bool _loggedMissingPlacement;
+    private string _lastStatusMessage;
+    private ARSessionState _lastSessionState;
+    private NotTrackingReason _lastNotTrackingReason;
 
     private void Awake()
     {
@@ -112,6 +119,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
     private void Update()
     {
+        UpdateSessionDiagnostics();
         UpdatePlacementPose();
         RefreshUiState();
     }
@@ -333,36 +341,43 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
     private void UpdatePlacementPose()
     {
-        if (targetCamera == null || raycastManager == null)
+        if (targetCamera == null)
         {
-            SetPlacementAvailability(false, default, null);
+            SetPlacementAvailability(false, default, null, false);
             return;
         }
 
         var screenPoint = targetCamera.ViewportToScreenPoint(new Vector3(_viewportCenter.x, _viewportCenter.y, 0f));
-        if (!raycastManager.Raycast(screenPoint, _raycastHits, TrackableType.PlaneWithinPolygon))
+        if (raycastManager != null && raycastManager.Raycast(screenPoint, _raycastHits, TrackableType.PlaneWithinPolygon))
         {
-            if (!_loggedMissingPlacement && verboseLogs)
-            {
-                _loggedMissingPlacement = true;
-                Debug.Log("[AR Prototype] No horizontal plane hit at screen centre.");
-            }
-
-            SetPlacementAvailability(false, default, null);
+            _loggedMissingPlacement = false;
+            var hit = _raycastHits[0];
+            var plane = planeManager != null ? planeManager.GetPlane(hit.trackableId) : null;
+            SetPlacementAvailability(true, hit.pose, plane, false);
             return;
         }
 
-        _loggedMissingPlacement = false;
-        var hit = _raycastHits[0];
-        var plane = planeManager != null ? planeManager.GetPlane(hit.trackableId) : null;
-        SetPlacementAvailability(true, hit.pose, plane);
+        if (!_loggedMissingPlacement && verboseLogs)
+        {
+            _loggedMissingPlacement = true;
+            Debug.Log("[AR Prototype] No horizontal plane hit at screen centre.");
+        }
+
+        if (TryGetFallbackPlacementPose(out var fallbackPose))
+        {
+            SetPlacementAvailability(true, fallbackPose, null, true);
+            return;
+        }
+
+        SetPlacementAvailability(false, default, null, false);
     }
 
-    private void SetPlacementAvailability(bool available, Pose pose, ARPlane plane)
+    private void SetPlacementAvailability(bool available, Pose pose, ARPlane plane, bool isFallbackPlacement)
     {
         _hasPlacementPose = available;
         _currentPlacementPose = pose;
         _currentPlacementPlane = plane;
+        _isFallbackPlacementPose = available && isFallbackPlacement;
 
         if (_placementIndicatorInstance != null)
         {
@@ -378,14 +393,23 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
         if (available)
         {
-            UpdateStatus(_placedAnchor == null
-                ? "Horizontal plane found. Press Place to create a phone-AR test anchor."
-                : "Horizontal plane found. Press Place to replace the current test anchor.");
+            if (_isFallbackPlacementPose)
+            {
+                UpdateStatus(_placedContent == null
+                    ? "No plane yet. Press Place to drop a temporary test object in front of the camera."
+                    : "No plane yet. Press Place to replace the temporary test object.");
+            }
+            else
+            {
+                UpdateStatus(_placedAnchor == null
+                    ? "Horizontal plane found. Press Place to create a phone-AR test anchor."
+                    : "Horizontal plane found. Press Place to replace the current test anchor.");
+            }
         }
         else if (!_isCreatingAnchor)
         {
-            UpdateStatus(_placedAnchor == null
-                ? "Move the phone until AR Foundation finds a horizontal plane."
+            UpdateStatus(_placedContent == null
+                ? BuildIdleStatusMessage(ARSession.state, ARSession.notTrackingReason)
                 : "Reset the current placement or move the phone to detect another horizontal plane.");
         }
     }
@@ -407,7 +431,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
         if (!_hasPlacementPose)
         {
             Debug.LogWarning("[AR Prototype] Place requested without a valid plane hit.");
-            UpdateStatus("No valid plane hit is available for placement.");
+            UpdateStatus("No valid placement pose is available yet.");
             return;
         }
 
@@ -425,50 +449,38 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     {
         _isCreatingAnchor = true;
         RefreshUiState();
-        UpdateStatus("Creating anchor...");
+        UpdateStatus(_isFallbackPlacementPose ? "Creating temporary placement..." : "Creating anchor...");
 
         ClearPlacedContent();
 
         ARAnchor anchor = null;
-        if (preferPlaneAttachedAnchorWhenAvailable && placementPlane != null)
+        var canTryAnchor = anchorManager != null &&
+            (placementPlane != null || ARSession.state == ARSessionState.SessionTracking);
+
+        if (preferPlaneAttachedAnchorWhenAvailable && placementPlane != null && anchorManager != null)
         {
             anchor = anchorManager.AttachAnchor(placementPlane, placementPose);
             if (anchor == null && verboseLogs)
                 Debug.LogWarning("[AR Prototype] Plane-attached anchor failed, falling back to TryAddAnchorAsync.");
         }
 
-        if (anchor == null)
+        if (anchor == null && canTryAnchor)
         {
-            if (anchorManager == null)
-            {
-                Debug.LogError("[AR Prototype] ARAnchorManager is missing.");
-                UpdateStatus("ARAnchorManager is missing. Cannot create an anchor.");
-                _isCreatingAnchor = false;
-                RefreshUiState();
-                return;
-            }
-
             try
             {
                 var result = await anchorManager.TryAddAnchorAsync(placementPose);
                 if (!result.status.IsSuccess() || result.value == null)
                 {
-                    Debug.LogError($"[AR Prototype] TryAddAnchorAsync failed: {result.status}");
-                    UpdateStatus($"Anchor creation failed: {result.status}");
-                    _isCreatingAnchor = false;
-                    RefreshUiState();
-                    return;
+                    Debug.LogWarning($"[AR Prototype] TryAddAnchorAsync failed: {result.status}. Falling back to an unanchored placement.");
                 }
-
-                anchor = result.value;
+                else
+                {
+                    anchor = result.value;
+                }
             }
             catch (Exception exception)
             {
-                Debug.LogError("[AR Prototype] Exception while creating anchor: " + exception);
-                UpdateStatus("Anchor creation threw an exception. See Console for details.");
-                _isCreatingAnchor = false;
-                RefreshUiState();
-                return;
+                Debug.LogWarning("[AR Prototype] Exception while creating anchor. Falling back to an unanchored placement: " + exception);
             }
         }
 
@@ -476,20 +488,34 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
         if (content == null)
         {
             Debug.LogError("[AR Prototype] Unable to create placement content.");
-            Destroy(anchor.gameObject);
-            UpdateStatus("Content creation failed. The anchor was removed.");
+            if (anchor != null)
+                Destroy(anchor.gameObject);
+            UpdateStatus("Content creation failed.");
             _isCreatingAnchor = false;
             RefreshUiState();
             return;
         }
 
-        content.transform.SetParent(anchor.transform, false);
-        content.transform.localRotation = Quaternion.identity;
-        content.transform.localPosition = Vector3.up * (ComputeBottomOffset(content.transform) + placedObjectSurfacePadding);
+        if (anchor != null)
+        {
+            content.transform.SetParent(anchor.transform, false);
+            content.transform.localRotation = Quaternion.identity;
+            content.transform.localPosition = Vector3.up * (ComputeBottomOffset(content.transform) + placedObjectSurfacePadding);
+        }
+        else
+        {
+            var placementRoot = new GameObject(FallbackPlacementRootName);
+            placementRoot.transform.SetPositionAndRotation(placementPose.position, placementPose.rotation);
+            content.transform.SetParent(placementRoot.transform, false);
+            content.transform.localRotation = Quaternion.identity;
+            content.transform.localPosition = Vector3.up * (ComputeBottomOffset(content.transform) + placedObjectSurfacePadding);
+        }
 
         _placedAnchor = anchor;
-        _placedContent = content;
-        UpdateStatus("Phone-AR prototype anchor created. This is not yet aligned to the DJI camera feed.");
+        _placedContent = anchor != null ? content : content.transform.parent.gameObject;
+        UpdateStatus(anchor != null
+            ? "Phone-AR prototype anchor created. This is not yet aligned to the DJI camera feed."
+            : "Temporary test object created without an AR anchor. This is only for on-device visual verification.");
 
         _isCreatingAnchor = false;
         RefreshUiState();
@@ -531,11 +557,91 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
     private void UpdateStatus(string message)
     {
+        if (string.Equals(_lastStatusMessage, message, StringComparison.Ordinal))
+            return;
+
+        _lastStatusMessage = message;
+
         if (statusText != null)
             statusText.text = message;
 
         if (verboseLogs)
             Debug.Log("[AR Prototype] " + message);
+    }
+
+    private void UpdateSessionDiagnostics()
+    {
+        var sessionState = ARSession.state;
+        var notTrackingReason = ARSession.notTrackingReason;
+        if (sessionState == _lastSessionState && notTrackingReason == _lastNotTrackingReason)
+            return;
+
+        _lastSessionState = sessionState;
+        _lastNotTrackingReason = notTrackingReason;
+
+        if (verboseLogs)
+        {
+            Debug.Log(
+                $"[AR Prototype] Session state changed: {sessionState}" +
+                (notTrackingReason != NotTrackingReason.None ? $" ({notTrackingReason})" : string.Empty)
+            );
+        }
+
+        if (!_hasPlacementPose && !_isCreatingAnchor)
+            UpdateStatus(BuildIdleStatusMessage(sessionState, notTrackingReason));
+    }
+
+    private string BuildIdleStatusMessage(ARSessionState sessionState, NotTrackingReason notTrackingReason)
+    {
+        switch (sessionState)
+        {
+            case ARSessionState.None:
+                return "AR session not started yet.";
+            case ARSessionState.CheckingAvailability:
+                return "Checking ARCore availability on the device.";
+            case ARSessionState.NeedsInstall:
+                return "ARCore needs to be installed or updated on the device.";
+            case ARSessionState.Installing:
+                return "Installing or updating ARCore.";
+            case ARSessionState.Unsupported:
+                return "This device does not report ARCore support.";
+            case ARSessionState.Ready:
+                return allowPlacementWithoutPlane
+                    ? "AR session ready. Move the phone for tracking, or press Place to spawn a temporary test object."
+                    : "AR session ready. Move the phone to start detecting a horizontal plane.";
+            case ARSessionState.SessionInitializing:
+                return "AR session is initializing. Move the phone slowly so tracking can start.";
+            case ARSessionState.SessionTracking:
+                return allowPlacementWithoutPlane
+                    ? "Tracking is live. Move the phone to find a horizontal plane, or press Place for a temporary test object."
+                    : "Tracking is live. Move the phone until a horizontal plane is found.";
+            default:
+                if (notTrackingReason == NotTrackingReason.None)
+                    return "Move the phone until AR Foundation finds a horizontal plane.";
+
+                return $"AR tracking is not ready yet: {notTrackingReason}.";
+        }
+    }
+
+    private bool TryGetFallbackPlacementPose(out Pose pose)
+    {
+        pose = default;
+        if (!allowPlacementWithoutPlane || targetCamera == null)
+            return false;
+
+        var forward = Vector3.ProjectOnPlane(targetCamera.transform.forward, Vector3.up);
+        if (forward.sqrMagnitude < 0.0001f)
+            forward = targetCamera.transform.forward;
+
+        if (forward.sqrMagnitude < 0.0001f)
+            forward = Vector3.forward;
+
+        forward.Normalize();
+        pose = new Pose(
+            targetCamera.transform.position + forward * fallbackPlacementDistance,
+            Quaternion.LookRotation(forward, Vector3.up)
+        );
+        return true;
     }
 
     private static float ComputeBottomOffset(Transform root)
