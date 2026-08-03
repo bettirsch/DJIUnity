@@ -111,6 +111,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
             EnsureSceneDependencies();
 
         DisableConflictingPrototypeComponents();
+        UpdateFeatureStartupGates(forceDisableRaycast: ShouldGuideTrackingStartup(ARSession.state));
         EnsureOverlayUi();
         EnsurePlacementIndicator();
         UpdateWarningLabel();
@@ -679,6 +680,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     {
         var sessionState = ARSession.state;
         ApplyCameraFeedPresentation(force: false);
+        UpdateFeatureStartupGates(forceDisableRaycast: ShouldGuideTrackingStartup(sessionState));
 
         if (sessionState == ARSessionState.SessionTracking)
             return;
@@ -745,7 +747,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
         if (arSession != null)
         {
-            ARSession.Reset();
+            arSession.Reset();
             arSession.enabled = true;
         }
 
@@ -825,6 +827,15 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
                 $"{(shouldPresentPhoneCameraFeed ? "phone AR camera for tracking startup" : "DJI video feed")}"
             );
         }
+    }
+
+    private void UpdateFeatureStartupGates(bool forceDisableRaycast)
+    {
+        if (raycastManager != null)
+            raycastManager.enabled = !forceDisableRaycast && !_sessionRestartInProgress;
+
+        if (anchorManager != null)
+            anchorManager.enabled = !_sessionRestartInProgress;
     }
 
     private bool ShouldGuideTrackingStartup(ARSessionState sessionState)
