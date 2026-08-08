@@ -70,10 +70,12 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
     [Header("Tracking Startup")]
     [SerializeField] private bool usePhoneCameraFeedWhileInitializing = true;
-    [SerializeField] [Min(1f)] private float trackingStartupTimeout = 8f;
+    [SerializeField] [Min(1f)] private float trackingStartupTimeout = 12f;
     [SerializeField] [Min(0.1f)] private float sessionRestartDelay = 0.75f;
     [SerializeField] [Range(0, 3)] private int maxAutomaticSessionResets = 1;
-    [SerializeField] private bool restartSessionOnTimestampRegression = true;
+    [SerializeField] private bool restartSessionOnTimestampRegression;
+    [SerializeField] private bool restartSessionWhenStartupIsInterrupted = true;
+    [SerializeField] [Min(0f)] private float startupRecoveryDelay = 0.35f;
 
     [Header("Debug")]
     [SerializeField] private bool verboseLogs;
@@ -98,10 +100,14 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     private bool _cameraFrameTimestampRegressed;
     private bool _sessionRestartInProgress;
     private bool _presentingPhoneCameraFeed;
+    private bool _applicationHasFocus = true;
+    private bool _applicationPaused;
+    private bool _startupWasInterrupted;
     private int _automaticSessionResetCount;
     private float _currentTrackingAttemptStartedAt;
     private float _lastCameraFrameReceivedAt;
     private long? _lastCameraFrameTimestampNs;
+    private Coroutine _startupRecoveryCoroutine;
 
     private void Awake()
     {
@@ -111,6 +117,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
             EnsureSceneDependencies();
 
         DisableConflictingPrototypeComponents();
+        ApplyTrackingStartupPreferences();
         UpdateFeatureStartupGates(forceDisableRaycast: ShouldGuideTrackingStartup(ARSession.state));
         EnsureOverlayUi();
         EnsurePlacementIndicator();
@@ -130,7 +137,9 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
         if (arCameraManager != null)
             arCameraManager.frameReceived += OnCameraFrameReceived;
 
+        ApplyTrackingStartupPreferences();
         BeginTrackingAttempt();
+        UpdateFeatureStartupGates(forceDisableRaycast: ShouldGuideTrackingStartup(ARSession.state));
         ApplyCameraFeedPresentation(force: true);
     }
 
@@ -144,6 +153,8 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
 
         if (arCameraManager != null)
             arCameraManager.frameReceived -= OnCameraFrameReceived;
+
+        StopStartupRecoveryRoutine();
     }
 
     private void Update()
@@ -222,6 +233,32 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
                 $"camera={targetCamera.name} origin={xrOrigin.name} session={arSession.name}"
             );
         }
+    }
+
+    private void OnApplicationFocus(bool hasFocus)
+    {
+        _applicationHasFocus = hasFocus;
+
+        if (!hasFocus)
+        {
+            RegisterStartupInterruption("application focus was lost");
+            return;
+        }
+
+        RecoverTrackingStartupAfterInterruption("application focus returned");
+    }
+
+    private void OnApplicationPause(bool pauseStatus)
+    {
+        _applicationPaused = pauseStatus;
+
+        if (pauseStatus)
+        {
+            RegisterStartupInterruption("application was paused");
+            return;
+        }
+
+        RecoverTrackingStartupAfterInterruption("application resumed");
     }
 
     private void DisableConflictingPrototypeComponents()
@@ -685,6 +722,12 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
         if (sessionState == ARSessionState.SessionTracking)
             return;
 
+        if (!_applicationHasFocus || _applicationPaused)
+            return;
+
+        if (_startupRecoveryCoroutine != null)
+            return;
+
         if (_sessionRestartInProgress || maxAutomaticSessionResets <= 0)
             return;
 
@@ -698,7 +741,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
         if (reason == null)
             return;
 
-        StartCoroutine(RestartArSessionAsync(reason));
+        StartCoroutine(RestartArSessionAsync(reason, countTowardsAutomaticLimit: true));
     }
 
     private string GetTrackingRestartReason(ARSessionState sessionState)
@@ -718,23 +761,16 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
         return "tracking never became active";
     }
 
-    private IEnumerator RestartArSessionAsync(string reason)
+    private IEnumerator RestartArSessionAsync(string reason, bool countTowardsAutomaticLimit)
     {
         _sessionRestartInProgress = true;
-        _automaticSessionResetCount++;
+        if (countTowardsAutomaticLimit)
+            _automaticSessionResetCount++;
+
         UpdateStatus($"AR tracking got stuck ({reason}). Restarting the AR session once...");
 
         if (verboseLogs)
             Debug.LogWarning($"[AR Prototype] Restarting AR session after startup failure: {reason}");
-
-        if (planeManager != null)
-            planeManager.enabled = false;
-
-        if (raycastManager != null)
-            raycastManager.enabled = false;
-
-        if (anchorManager != null)
-            anchorManager.enabled = false;
 
         if (arSession != null)
             arSession.enabled = false;
@@ -743,6 +779,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
         yield return new WaitForSecondsRealtime(sessionRestartDelay);
 
         ResetTrackingAttemptState();
+        ApplyTrackingStartupPreferences();
         ApplyCameraFeedPresentation(force: true);
 
         if (arSession != null)
@@ -751,17 +788,9 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
             arSession.enabled = true;
         }
 
-        if (anchorManager != null)
-            anchorManager.enabled = true;
-
-        if (raycastManager != null)
-            raycastManager.enabled = true;
-
-        if (planeManager != null)
-            planeManager.enabled = true;
-
-        UpdateStatus("AR session restarted. Point the phone camera at a textured floor or wall and move slowly.");
         _sessionRestartInProgress = false;
+        UpdateFeatureStartupGates(forceDisableRaycast: ShouldGuideTrackingStartup(ARSession.state));
+        UpdateStatus("AR session restarted. Point the phone camera at a textured floor or wall and move slowly.");
     }
 
     private void OnCameraFrameReceived(ARCameraFrameEventArgs eventArgs)
@@ -791,6 +820,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
     private void BeginTrackingAttempt()
     {
         _trackingEverEstablished = ARSession.state == ARSessionState.SessionTracking;
+        _startupWasInterrupted = false;
         ResetTrackingAttemptState();
     }
 
@@ -835,7 +865,7 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
             raycastManager.enabled = !forceDisableRaycast && !_sessionRestartInProgress;
 
         if (anchorManager != null)
-            anchorManager.enabled = !_sessionRestartInProgress;
+            anchorManager.enabled = !forceDisableRaycast && !_sessionRestartInProgress;
     }
 
     private bool ShouldGuideTrackingStartup(ARSessionState sessionState)
@@ -845,10 +875,80 @@ public sealed class ARPlacementPrototypeController : MonoBehaviour
             sessionState != ARSessionState.SessionTracking;
     }
 
+    private void ApplyTrackingStartupPreferences()
+    {
+        if (planeManager != null)
+            planeManager.requestedDetectionMode = PlaneDetectionMode.Horizontal;
+
+        if (arCameraManager != null)
+        {
+            arCameraManager.autoFocusRequested = true;
+            arCameraManager.requestedLightEstimation = LightEstimation.None;
+            arCameraManager.requestedFacingDirection = CameraFacingDirection.World;
+        }
+
+        if (arSession != null)
+            arSession.matchFrameRateRequested = false;
+    }
+
+    private void RegisterStartupInterruption(string reason)
+    {
+        if (_trackingEverEstablished || !ShouldGuideTrackingStartup(ARSession.state))
+            return;
+
+        _startupWasInterrupted = true;
+        StopStartupRecoveryRoutine();
+
+        if (verboseLogs)
+            Debug.LogWarning($"[AR Prototype] Startup tracking was interrupted because {reason}.");
+    }
+
+    private void RecoverTrackingStartupAfterInterruption(string reason)
+    {
+        if (!restartSessionWhenStartupIsInterrupted || !_startupWasInterrupted || _trackingEverEstablished)
+            return;
+
+        if (!isActiveAndEnabled)
+            return;
+
+        StopStartupRecoveryRoutine();
+        _startupRecoveryCoroutine = StartCoroutine(RecoverTrackingStartupAfterInterruptionAsync(reason));
+    }
+
+    private IEnumerator RecoverTrackingStartupAfterInterruptionAsync(string reason)
+    {
+        if (startupRecoveryDelay > 0f)
+            yield return new WaitForSecondsRealtime(startupRecoveryDelay);
+
+        _startupRecoveryCoroutine = null;
+
+        if (!isActiveAndEnabled || _trackingEverEstablished || !_applicationHasFocus || _applicationPaused)
+            yield break;
+
+        _startupWasInterrupted = false;
+
+        if (arSession == null)
+        {
+            BeginTrackingAttempt();
+            ApplyTrackingStartupPreferences();
+            yield break;
+        }
+
+        yield return RestartArSessionAsync($"{reason} during AR startup", countTowardsAutomaticLimit: false);
+    }
+
+    private void StopStartupRecoveryRoutine()
+    {
+        if (_startupRecoveryCoroutine == null)
+            return;
+
+        StopCoroutine(_startupRecoveryCoroutine);
+        _startupRecoveryCoroutine = null;
+    }
+
     private bool ShouldHoldPlacementUntilTracking()
     {
-        return ShouldGuideTrackingStartup(ARSession.state) &&
-            _automaticSessionResetCount < maxAutomaticSessionResets;
+        return ShouldGuideTrackingStartup(ARSession.state);
     }
 
     private string BuildTrackingStartupMessage(ARSessionState sessionState, NotTrackingReason notTrackingReason)
