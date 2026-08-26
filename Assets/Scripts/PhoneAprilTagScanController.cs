@@ -20,7 +20,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float PoseCorrectionLerp = 0.45f;
 
     [SerializeField] private ARCameraManager cameraManager;
-    [SerializeField] [Min(0.1f)] private float detectionIntervalSeconds = 0.2f;
+    [SerializeField] [Min(0.1f)] private float detectionIntervalSeconds = 0.1f;
     [SerializeField] [Min(1)] private int confirmationsRequired = 3;
     [SerializeField] private int targetTagId;
 
@@ -51,7 +51,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private void OnEnable()
     {
         DJIAprilTagNative.SetTargetTagId(targetTagId);
-        StartCoroutine(InitializeImageTracking());
+        StartCoroutine(ScanLoop());
     }
 
     private void OnDisable()
