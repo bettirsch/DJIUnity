@@ -52,7 +52,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         SetStatus("Az AprilTag beolvasás az Android buildben működik.");
         yield break;
 #else
-        while (!_markerConfirmed)
+        while (true)
         {
             if (cameraManager == null)
             {
@@ -85,15 +85,28 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
                 if (detected)
                 {
-                    _consecutiveMatches++;
-                    SetStatus($"AprilTag {targetTagId} felismerve ({_consecutiveMatches}/{confirmationsRequired})");
-                    if (_consecutiveMatches >= confirmationsRequired)
-                        ConfirmMarker();
+                    if (!_markerConfirmed)
+                    {
+                        _consecutiveMatches++;
+                        SetStatus($"AprilTag {targetTagId} felismerve ({_consecutiveMatches}/{confirmationsRequired})");
+                        if (_consecutiveMatches >= confirmationsRequired)
+                            ConfirmMarker();
+                    }
+
+                    if (_markerConfirmed)
+                        ShowMarkerPreview();
                 }
                 else
                 {
-                    _consecutiveMatches = 0;
-                    SetStatus($"Irányítsa a telefon kameráját az AprilTag {targetTagId} markerre.");
+                    if (_markerConfirmed)
+                    {
+                        SetStatus("Marker rögzítve. Tartsa az AprilTag-et a telefon kameraképében.");
+                    }
+                    else
+                    {
+                        _consecutiveMatches = 0;
+                        SetStatus($"Irányítsa a telefon kameráját az AprilTag {targetTagId} markerre.");
+                    }
                 }
             }
             finally
