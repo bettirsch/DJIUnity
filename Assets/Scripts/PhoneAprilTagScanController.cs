@@ -12,7 +12,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const string RuntimeCanvasName = "Phone AprilTag Scan Canvas";
     private const string DroneViewSceneName = "DroneView";
     private const string PreviewCubeName = "Phone AprilTag Preview Cube";
-    private const float PreviewCubeDistanceMeters = 0.8f;
+    private const float PrintedTagSizeMeters = 0.2f;
+    private const float PreviewCubeSizeMeters = 0.14f;
 
     [SerializeField] private ARCameraManager cameraManager;
     [SerializeField] [Min(0.1f)] private float detectionIntervalSeconds = 0.2f;
@@ -20,11 +21,13 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     [SerializeField] private int targetTagId;
 
     private readonly float[] _nativeDetection = new float[12];
+    private readonly float[] _nativePose = new float[12];
     private Text _statusLabel;
     private Button _connectDroneButton;
     private GameObject _previewCube;
     private int _consecutiveMatches;
     private bool _markerConfirmed;
+    private bool _hasTagPose;
 
     private void Awake()
     {
@@ -76,7 +79,30 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                 try
                 {
                     image.Convert(conversion, pixels);
-                    detected = DJIAprilTagNative.TryDetect(pixels.ToArray(), conversion.outputDimensions.x, conversion.outputDimensions.y, _nativeDetection);
+                    var rgbaBytes = pixels.ToArray();
+                    if (cameraManager.TryGetIntrinsics(out var intrinsics))
+                    {
+                        var imageToIntrinsicsScale = new Vector2(
+                            conversion.outputDimensions.x / (float)intrinsics.resolution.x,
+                            conversion.outputDimensions.y / (float)intrinsics.resolution.y);
+                        detected = DJIAprilTagNative.TryDetectPose(
+                            rgbaBytes,
+                            conversion.outputDimensions.x,
+                            conversion.outputDimensions.y,
+                            intrinsics.focalLength.x * imageToIntrinsicsScale.x,
+                            intrinsics.focalLength.y * imageToIntrinsicsScale.y,
+                            intrinsics.principalPoint.x * imageToIntrinsicsScale.x,
+                            intrinsics.principalPoint.y * imageToIntrinsicsScale.y,
+                            PrintedTagSizeMeters,
+                            _nativeDetection,
+                            _nativePose);
+                        _hasTagPose = detected;
+                    }
+                    else
+                    {
+                        detected = DJIAprilTagNative.TryDetect(rgbaBytes, conversion.outputDimensions.x, conversion.outputDimensions.y, _nativeDetection);
+                        _hasTagPose = false;
+                    }
                 }
                 finally
                 {
@@ -100,7 +126,9 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                 {
                     if (_markerConfirmed)
                     {
-                        SetStatus("Marker rögzítve. Tartsa az AprilTag-et a telefon kameraképében.");
+                        SetStatus(_hasTagPose
+                            ? "Marker rögzítve. Tartsa az AprilTag-et a telefon kameraképében."
+                            : "Marker felismerve, de a telefon kamerakalibrációja még nem érhető el.");
                     }
                     else
                     {
@@ -131,7 +159,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private void ShowMarkerPreview()
     {
         var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
-        if (targetCamera == null)
+        if (targetCamera == null || !_hasTagPose)
             return;
 
         if (_previewCube == null)
@@ -154,14 +182,17 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             }
         }
 
-        var viewportX = Mathf.Clamp01(_nativeDetection[1]);
-        var viewportY = 1f - Mathf.Clamp01(_nativeDetection[2]);
-        var worldPosition = targetCamera.ViewportToWorldPoint(new Vector3(viewportX, viewportY, PreviewCubeDistanceMeters));
+        var tagPosition = new Vector3(_nativePose[0], _nativePose[1], -_nativePose[2]);
+        var tagRight = new Vector3(_nativePose[3], _nativePose[6], -_nativePose[9]).normalized;
+        var tagUp = new Vector3(_nativePose[4], _nativePose[7], -_nativePose[10]).normalized;
+        var tagNormal = Vector3.Cross(tagRight, tagUp).normalized;
+        if (tagRight.sqrMagnitude < 0.9f || tagUp.sqrMagnitude < 0.9f || tagNormal.sqrMagnitude < 0.9f)
+            return;
 
-        _previewCube.transform.SetParent(targetCamera.transform, true);
-        _previewCube.transform.localPosition = targetCamera.transform.InverseTransformPoint(worldPosition);
-        _previewCube.transform.localRotation = Quaternion.identity;
-        _previewCube.transform.localScale = Vector3.one * 0.14f;
+        _previewCube.transform.SetParent(targetCamera.transform, false);
+        _previewCube.transform.localPosition = tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f);
+        _previewCube.transform.localRotation = Quaternion.LookRotation(tagNormal, tagUp);
+        _previewCube.transform.localScale = Vector3.one * PreviewCubeSizeMeters;
         _previewCube.SetActive(true);
     }
 
