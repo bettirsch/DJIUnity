@@ -25,6 +25,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private Text _statusLabel;
     private Button _connectDroneButton;
     private GameObject _previewCube;
+    private ARAnchorManager _anchorManager;
+    private ARAnchor _previewAnchor;
     private int _consecutiveMatches;
     private bool _markerConfirmed;
     private bool _hasTagPose;
@@ -33,6 +35,9 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     {
         DisableLegacyPlacementPrototype();
         cameraManager ??= FindAnyObjectByType<ARCameraManager>();
+        _anchorManager ??= FindAnyObjectByType<ARAnchorManager>();
+        if (_anchorManager != null)
+            _anchorManager.enabled = true;
         CreateUi();
         AprilTagScanSession.Clear();
     }
@@ -159,7 +164,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private void ShowMarkerPreview()
     {
         var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
-        if (targetCamera == null || !_hasTagPose)
+        if (targetCamera == null || !_hasTagPose || _previewAnchor != null)
             return;
 
         if (_previewCube == null)
@@ -189,9 +194,25 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         if (tagRight.sqrMagnitude < 0.9f || tagUp.sqrMagnitude < 0.9f || tagNormal.sqrMagnitude < 0.9f)
             return;
 
-        _previewCube.transform.SetParent(targetCamera.transform, false);
-        _previewCube.transform.localPosition = tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f);
-        _previewCube.transform.localRotation = Quaternion.LookRotation(tagNormal, tagUp);
+        var cubeLocalPosition = tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f);
+        var cubeLocalRotation = Quaternion.LookRotation(tagNormal, tagUp);
+        var anchorObject = new GameObject("Phone AprilTag Anchor");
+        anchorObject.transform.SetPositionAndRotation(
+            targetCamera.transform.TransformPoint(cubeLocalPosition),
+            targetCamera.transform.rotation * cubeLocalRotation);
+        _previewAnchor = anchorObject.AddComponent<ARAnchor>();
+
+        if (!_previewAnchor.isActiveAndEnabled)
+        {
+            Destroy(anchorObject);
+            _previewAnchor = null;
+            SetStatus("Az ARCore ankor nem indult el. Irányítsa újra a telefont az AprilTag-re.");
+            return;
+        }
+
+        _previewCube.transform.SetParent(_previewAnchor.transform, false);
+        _previewCube.transform.localPosition = Vector3.zero;
+        _previewCube.transform.localRotation = Quaternion.identity;
         _previewCube.transform.localScale = Vector3.one * PreviewCubeSizeMeters;
         _previewCube.SetActive(true);
     }
@@ -212,9 +233,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
         foreach (var raycastManager in FindObjectsByType<ARRaycastManager>(FindObjectsInactive.Include, FindObjectsSortMode.None))
             raycastManager.enabled = false;
-
-        foreach (var anchorManager in FindObjectsByType<ARAnchorManager>(FindObjectsInactive.Include, FindObjectsSortMode.None))
-            anchorManager.enabled = false;
 
         var djiBackground = FindAnyObjectByType<DJIGPUBackground>();
         if (djiBackground != null)
