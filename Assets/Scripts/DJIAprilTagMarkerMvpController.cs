@@ -57,6 +57,9 @@ public sealed class DJIAprilTagMarkerMvpController : MonoBehaviour
 
     private void OnEnable()
     {
+        if (AprilTagScanSession.HasConfirmedMarker)
+            targetTagId = AprilTagScanSession.TargetTagId;
+
         DJIAprilTagNative.SetTargetTagId(targetTagId);
 
         if (_detectionLoop == null)
@@ -190,6 +193,10 @@ public sealed class DJIAprilTagMarkerMvpController : MonoBehaviour
         {
             cubeRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             cubeRenderer.receiveShadows = false;
+            var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Universal Render Pipeline/Lit");
+            if (shader != null)
+                cubeRenderer.material = new Material(shader);
+
             cubeRenderer.material.color = cubeColor;
         }
     }
@@ -258,7 +265,7 @@ public sealed class DJIAprilTagMarkerMvpController : MonoBehaviour
             rectTransform.sizeDelta = new Vector2(900f, 72f);
 
             var background = statusObject.AddComponent<Image>();
-            background.color = new Color(0.05f, 0.08f, 0.12f, 0.76f);
+            background.color = new Color(0.05f, 0.08f, 0.12f, 0.0f);
 
             var textObject = new GameObject("Label");
             textObject.transform.SetParent(statusObject.transform, false);
@@ -313,6 +320,9 @@ internal static class DJIAprilTagMarkerMvpBootstrap
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void Install()
     {
+        if (UnityEngine.SceneManagement.SceneManager.GetActiveScene().name != "DroneView")
+            return;
+
         var camera = Camera.main ?? Object.FindAnyObjectByType<Camera>();
         if (camera == null || camera.GetComponent<DJIAprilTagMarkerMvpController>() != null)
             return;
