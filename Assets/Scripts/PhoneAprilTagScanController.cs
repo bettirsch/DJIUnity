@@ -14,6 +14,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const string PreviewCubeName = "Phone AprilTag Preview Cube";
     private const float PrintedTagSizeMeters = 0.2f;
     private const float PreviewCubeSizeMeters = 0.14f;
+    private const float PoseCorrectionLerp = 0.45f;
 
     [SerializeField] private ARCameraManager cameraManager;
     [SerializeField] [Min(0.1f)] private float detectionIntervalSeconds = 0.2f;
@@ -164,7 +165,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private void ShowMarkerPreview()
     {
         var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
-        if (targetCamera == null || !_hasTagPose || _previewAnchor != null)
+        if (targetCamera == null || !_hasTagPose)
             return;
 
         if (_previewCube == null)
@@ -196,10 +197,26 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
         var cubeLocalPosition = tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f);
         var cubeLocalRotation = Quaternion.LookRotation(tagNormal, tagUp);
+        var cubeWorldPosition = targetCamera.transform.TransformPoint(cubeLocalPosition);
+        var cubeWorldRotation = targetCamera.transform.rotation * cubeLocalRotation;
+
+        if (_previewAnchor != null)
+        {
+            var correctedLocalPosition = _previewAnchor.transform.InverseTransformPoint(cubeWorldPosition);
+            var correctedLocalRotation = Quaternion.Inverse(_previewAnchor.transform.rotation) * cubeWorldRotation;
+            _previewCube.transform.localPosition = Vector3.Lerp(
+                _previewCube.transform.localPosition,
+                correctedLocalPosition,
+                PoseCorrectionLerp);
+            _previewCube.transform.localRotation = Quaternion.Slerp(
+                _previewCube.transform.localRotation,
+                correctedLocalRotation,
+                PoseCorrectionLerp);
+            return;
+        }
+
         var anchorObject = new GameObject("Phone AprilTag Anchor");
-        anchorObject.transform.SetPositionAndRotation(
-            targetCamera.transform.TransformPoint(cubeLocalPosition),
-            targetCamera.transform.rotation * cubeLocalRotation);
+        anchorObject.transform.SetPositionAndRotation(cubeWorldPosition, cubeWorldRotation);
         _previewAnchor = anchorObject.AddComponent<ARAnchor>();
 
         if (!_previewAnchor.isActiveAndEnabled)
