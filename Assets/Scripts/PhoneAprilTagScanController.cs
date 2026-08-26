@@ -14,7 +14,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const string DroneViewSceneName = "DroneView";
     private const string PreviewCubeName = "Phone AprilTag Preview Cube";
     private const string ReferenceImageResourceName = "AprilTagReference";
-    private const float ReferenceImageWidthMeters = 0.21f;
+    private const float ReferenceImageWidthMeters = 0.2f;
     private const float PrintedTagSizeMeters = 0.2f;
     private const float PreviewCubeSizeMeters = 0.14f;
     private const float PoseCorrectionLerp = 0.45f;
