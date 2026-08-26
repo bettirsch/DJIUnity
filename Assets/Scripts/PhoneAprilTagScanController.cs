@@ -72,7 +72,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         while (ARSession.state == ARSessionState.None || ARSession.state == ARSessionState.CheckingAvailability)
             yield return null;
 
-        if (ARSession.state != ARSessionState.SessionInitializing && ARSession.state != ARSessionState.SessionTracking)
+        if (ARSession.state < ARSessionState.Ready)
         {
             SetStatus("Az ARCore image tracking nem érhető el ezen a készüléken.");
             yield break;
