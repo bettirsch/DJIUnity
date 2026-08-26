@@ -11,6 +11,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 {
     private const string RuntimeCanvasName = "Phone AprilTag Scan Canvas";
     private const string DroneViewSceneName = "DroneView";
+    private const string PreviewCubeName = "Phone AprilTag Preview Cube";
+    private const float PreviewCubeDistanceMeters = 0.8f;
 
     [SerializeField] private ARCameraManager cameraManager;
     [SerializeField] [Min(0.1f)] private float detectionIntervalSeconds = 0.2f;
@@ -20,6 +22,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private readonly float[] _nativeDetection = new float[12];
     private Text _statusLabel;
     private Button _connectDroneButton;
+    private GameObject _previewCube;
     private int _consecutiveMatches;
     private bool _markerConfirmed;
 
@@ -107,8 +110,46 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     {
         _markerConfirmed = true;
         AprilTagScanSession.Confirm(targetTagId);
+        ShowMarkerPreview();
         SetStatus("Marker rögzítve. Csatlakoztassa a drónt, majd folytassa.");
         _connectDroneButton.gameObject.SetActive(true);
+    }
+
+    private void ShowMarkerPreview()
+    {
+        var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
+        if (targetCamera == null)
+            return;
+
+        if (_previewCube == null)
+        {
+            _previewCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            _previewCube.name = PreviewCubeName;
+
+            var collider = _previewCube.GetComponent<Collider>();
+            if (collider != null)
+                Destroy(collider);
+
+            var cubeRenderer = _previewCube.GetComponent<Renderer>();
+            var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Universal Render Pipeline/Lit");
+            if (cubeRenderer != null && shader != null)
+            {
+                cubeRenderer.material = new Material(shader);
+                cubeRenderer.material.color = new Color(1f, 0f, 0.78f, 1f);
+                cubeRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                cubeRenderer.receiveShadows = false;
+            }
+        }
+
+        var viewportX = Mathf.Clamp01(_nativeDetection[1]);
+        var viewportY = 1f - Mathf.Clamp01(_nativeDetection[2]);
+        var worldPosition = targetCamera.ViewportToWorldPoint(new Vector3(viewportX, viewportY, PreviewCubeDistanceMeters));
+
+        _previewCube.transform.SetParent(targetCamera.transform, true);
+        _previewCube.transform.localPosition = targetCamera.transform.InverseTransformPoint(worldPosition);
+        _previewCube.transform.localRotation = Quaternion.identity;
+        _previewCube.transform.localScale = Vector3.one * 0.14f;
+        _previewCube.SetActive(true);
     }
 
     private void LoadDroneView()
