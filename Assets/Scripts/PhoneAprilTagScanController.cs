@@ -5,6 +5,7 @@ using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
+using Unity.XR.CoreUtils;
 
 [DisallowMultipleComponent]
 public sealed class PhoneAprilTagScanController : MonoBehaviour
@@ -12,6 +13,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const string RuntimeCanvasName = "Phone AprilTag Scan Canvas";
     private const string DroneViewSceneName = "DroneView";
     private const string PreviewCubeName = "Phone AprilTag Preview Cube";
+    private const string ReferenceImageResourceName = "AprilTagReference";
+    private const float ReferenceImageWidthMeters = 0.21f;
     private const float PrintedTagSizeMeters = 0.2f;
     private const float PreviewCubeSizeMeters = 0.14f;
     private const float PoseCorrectionLerp = 0.45f;
@@ -28,6 +31,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private GameObject _previewCube;
     private ARAnchorManager _anchorManager;
     private ARAnchor _previewAnchor;
+    private ARTrackedImageManager _trackedImageManager;
+    private Texture2D _runtimeReferenceTexture;
     private int _consecutiveMatches;
     private bool _markerConfirmed;
     private bool _hasTagPose;
@@ -46,13 +51,148 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private void OnEnable()
     {
         DJIAprilTagNative.SetTargetTagId(targetTagId);
-        StartCoroutine(ScanLoop());
+        StartCoroutine(InitializeImageTracking());
     }
 
     private void OnDisable()
     {
         StopAllCoroutines();
+        if (_trackedImageManager != null)
+            _trackedImageManager.trackablesChanged.RemoveListener(OnTrackedImagesChanged);
         DJIAprilTagNative.ReleaseDetector();
+    }
+
+    private IEnumerator InitializeImageTracking()
+    {
+#if !UNITY_ANDROID || UNITY_EDITOR
+        SetStatus("Az ARCore image tracking az Android buildben működik.");
+        yield break;
+#else
+        SetStatus("AprilTag image tracker indítása...");
+        while (ARSession.state == ARSessionState.None || ARSession.state == ARSessionState.CheckingAvailability)
+            yield return null;
+
+        if (ARSession.state != ARSessionState.SessionInitializing && ARSession.state != ARSessionState.SessionTracking)
+        {
+            SetStatus("Az ARCore image tracking nem érhető el ezen a készüléken.");
+            yield break;
+        }
+
+        var origin = FindAnyObjectByType<XROrigin>();
+        if (origin == null)
+        {
+            SetStatus("Az XR Origin nem érhető el.");
+            yield break;
+        }
+
+        _trackedImageManager = origin.GetComponent<ARTrackedImageManager>();
+        if (_trackedImageManager == null)
+        {
+            _trackedImageManager = origin.gameObject.AddComponent<ARTrackedImageManager>();
+            _trackedImageManager.enabled = false;
+        }
+
+        var imageBytes = Resources.Load<TextAsset>(ReferenceImageResourceName);
+        if (imageBytes == null)
+        {
+            SetStatus("Az AprilTag referencia kép hiányzik a buildből.");
+            yield break;
+        }
+
+        _runtimeReferenceTexture = new Texture2D(2, 2, TextureFormat.RGBA32, false, false);
+        if (!_runtimeReferenceTexture.LoadImage(imageBytes.bytes, false))
+        {
+            SetStatus("Az AprilTag referencia kép nem tölthető be.");
+            yield break;
+        }
+
+        RuntimeReferenceImageLibrary runtimeLibrary;
+        try
+        {
+            runtimeLibrary = _trackedImageManager.CreateRuntimeLibrary();
+        }
+        catch (System.Exception exception)
+        {
+            SetStatus($"Az ARCore image tracker nem indítható: {exception.Message}");
+            yield break;
+        }
+
+        if (runtimeLibrary is not MutableRuntimeReferenceImageLibrary mutableLibrary)
+        {
+            SetStatus("Ez az ARCore eszköz nem támogatja a runtime marker library-t.");
+            yield break;
+        }
+
+        var addImage = mutableLibrary.ScheduleAddImageWithValidationJob(
+            _runtimeReferenceTexture,
+            "AprilTag-A4-0",
+            ReferenceImageWidthMeters);
+        yield return new WaitUntil(() => addImage.status.IsComplete());
+        if (!addImage.status.IsSuccess())
+        {
+            SetStatus($"Az AprilTag referencia kép elutasítva: {addImage.status}.");
+            yield break;
+        }
+
+        _trackedImageManager.referenceLibrary = runtimeLibrary;
+        _trackedImageManager.requestedMaxNumberOfMovingImages = 1;
+        _trackedImageManager.trackablesChanged.AddListener(OnTrackedImagesChanged);
+        _trackedImageManager.enabled = true;
+        SetStatus("Irányítsa a telefon kameráját az A4 AprilTag markerre.");
+#endif
+    }
+
+    private void OnTrackedImagesChanged(ARTrackablesChangedEventArgs<ARTrackedImage> changes)
+    {
+        foreach (var trackedImage in changes.added)
+            UpdateTrackedImagePreview(trackedImage);
+
+        foreach (var trackedImage in changes.updated)
+            UpdateTrackedImagePreview(trackedImage);
+    }
+
+    private void UpdateTrackedImagePreview(ARTrackedImage trackedImage)
+    {
+        if (trackedImage.trackingState != TrackingState.Tracking)
+        {
+            if (_previewCube != null)
+                _previewCube.SetActive(false);
+            return;
+        }
+
+        if (_previewCube == null)
+        {
+            _previewCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            _previewCube.name = PreviewCubeName;
+
+            var collider = _previewCube.GetComponent<Collider>();
+            if (collider != null)
+                Destroy(collider);
+
+            var cubeRenderer = _previewCube.GetComponent<Renderer>();
+            var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Universal Render Pipeline/Lit");
+            if (cubeRenderer != null && shader != null)
+            {
+                cubeRenderer.material = new Material(shader);
+                cubeRenderer.material.color = new Color(1f, 0f, 0.78f, 1f);
+                cubeRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                cubeRenderer.receiveShadows = false;
+            }
+        }
+
+        _previewCube.transform.SetParent(trackedImage.transform, false);
+        _previewCube.transform.localPosition = Vector3.forward * (PreviewCubeSizeMeters * 0.5f);
+        _previewCube.transform.localRotation = Quaternion.identity;
+        _previewCube.transform.localScale = Vector3.one * PreviewCubeSizeMeters;
+        _previewCube.SetActive(true);
+
+        if (!_markerConfirmed)
+        {
+            _markerConfirmed = true;
+            AprilTagScanSession.Confirm(targetTagId);
+            SetStatus("AprilTag rögzítve ARCore image trackinggel. Csatlakoztassa a drónt, majd folytassa.");
+            _connectDroneButton.gameObject.SetActive(true);
+        }
     }
 
     private IEnumerator ScanLoop()
