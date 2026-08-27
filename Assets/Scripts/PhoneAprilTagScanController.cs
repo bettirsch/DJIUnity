@@ -41,11 +41,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private float _lastPoseUpdateTime = float.NegativeInfinity;
     private XRCameraIntrinsics _cachedIntrinsics;
     private bool _hasCachedIntrinsics;
-    private Vector3 _trackedTagWorldPosition;
-    private Quaternion _trackedTagWorldRotation;
-    private Vector3 _selectedCubeWorldPosition;
-    private Quaternion _selectedCubeWorldRotation;
-    private bool _hasTrackedTagWorldPose;
+    private Vector3 _selectedCubeCameraPosition;
+    private Quaternion _selectedCubeCameraRotation;
 
     private void Awake()
     {
@@ -92,7 +89,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             Time.unscaledTime - _lastPoseUpdateTime > MarkerLostTimeoutSeconds)
         {
             _previewCube.SetActive(false);
-            _hasTrackedTagWorldPose = false;
         }
     }
 
@@ -287,7 +283,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                             PrintedTagSizeMeters,
                             _nativeDetection,
                             _nativePoseCandidates);
-                        _hasTagPose = TrySelectWorldPose(poseCandidateCount);
+                        _hasTagPose = TrySelectCameraRelativePose(poseCandidateCount);
                         tagDetected = _hasTagPose || Mathf.RoundToInt(_nativeDetection[0]) == targetTagId;
                     }
                     else
@@ -386,14 +382,20 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         if (!_hasTagPose)
             return;
 
-        _previewCube.transform.SetParent(null, true);
-        _previewCube.transform.SetPositionAndRotation(_selectedCubeWorldPosition, _selectedCubeWorldRotation);
+        // The PnP pose describes this CPU image's camera frame. Keeping the cube in that
+        // frame avoids mixing a frame's pose with a later ARCore world-camera transform.
+        var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
+        if (targetCamera == null)
+            return;
+
+        _previewCube.transform.SetParent(targetCamera.transform, false);
+        _previewCube.transform.SetLocalPositionAndRotation(_selectedCubeCameraPosition, _selectedCubeCameraRotation);
         _previewCube.transform.localScale = Vector3.one * PreviewCubeSizeMeters;
         _previewCube.SetActive(true);
         _lastPoseUpdateTime = Time.unscaledTime;
     }
 
-    private bool TrySelectWorldPose(int poseCandidateCount)
+    private bool TrySelectCameraRelativePose(int poseCandidateCount)
     {
         var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
         if (targetCamera == null)
@@ -401,8 +403,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
         var bestScore = float.PositiveInfinity;
         var hasBestCandidate = false;
-        var bestTagPosition = Vector3.zero;
-        var bestTagRotation = Quaternion.identity;
         var bestCubePosition = Vector3.zero;
         var bestCubeRotation = Quaternion.identity;
         var candidateLimit = Mathf.Min(poseCandidateCount, MaximumPoseCandidates);
@@ -434,37 +434,30 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                 continue;
             }
 
-            var tagWorldPosition = targetCamera.transform.TransformPoint(tagPosition);
-            var tagWorldRotation = targetCamera.transform.rotation * Quaternion.LookRotation(tagNormal, tagUp);
-            var cubeWorldPosition = targetCamera.transform.TransformPoint(tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f));
-
-            // A fixed marker should retain the same ARCore world pose between frames.
-            var score = reprojectionError * 0.02f;
-            if (_hasTrackedTagWorldPose)
+            // The visible face of a printed marker points towards the camera. This makes
+            // the cube's rear face lie on the tag and its top remain the visible face overhead.
+            if (Vector3.Dot(tagNormal, tagPosition) > 0f)
             {
-                score += Vector3.Distance(tagWorldPosition, _trackedTagWorldPosition) / 0.04f;
-                score += Quaternion.Angle(tagWorldRotation, _trackedTagWorldRotation) / 15f;
+                tagNormal = -tagNormal;
+                tagRight = -tagRight;
             }
+
+            var score = reprojectionError;
 
             if (score >= bestScore)
                 continue;
 
             bestScore = score;
             hasBestCandidate = true;
-            bestTagPosition = tagWorldPosition;
-            bestTagRotation = tagWorldRotation;
-            bestCubePosition = cubeWorldPosition;
-            bestCubeRotation = tagWorldRotation;
+            bestCubePosition = tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f);
+            bestCubeRotation = Quaternion.LookRotation(tagNormal, tagUp);
         }
 
         if (!hasBestCandidate)
             return false;
 
-        _trackedTagWorldPosition = bestTagPosition;
-        _trackedTagWorldRotation = bestTagRotation;
-        _selectedCubeWorldPosition = bestCubePosition;
-        _selectedCubeWorldRotation = bestCubeRotation;
-        _hasTrackedTagWorldPose = true;
+        _selectedCubeCameraPosition = bestCubePosition;
+        _selectedCubeCameraRotation = bestCubeRotation;
         return true;
     }
 
