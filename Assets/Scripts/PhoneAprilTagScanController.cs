@@ -39,9 +39,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private float _lastPoseUpdateTime = float.NegativeInfinity;
     private XRCameraIntrinsics _cachedIntrinsics;
     private bool _hasCachedIntrinsics;
-    private Vector3 _detectionCameraPosition;
-    private Quaternion _detectionCameraRotation;
-    private bool _hasDetectionCameraPose;
 
     private void Awake()
     {
@@ -246,7 +243,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
             try
             {
-                CaptureDetectionCameraPose();
                 // ARCore intrinsics describe this unrotated CPU image, not the display texture.
                 var conversion = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32)
                 {
@@ -363,21 +359,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         return fx > 0f && fy > 0f;
     }
 
-    private void CaptureDetectionCameraPose()
-    {
-        var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
-        if (targetCamera == null)
-        {
-            _hasDetectionCameraPose = false;
-            return;
-        }
-
-        // Keep the AR pose paired with the CPU image that produced the AprilTag pose.
-        _detectionCameraPosition = targetCamera.transform.position;
-        _detectionCameraRotation = targetCamera.transform.rotation;
-        _hasDetectionCameraPose = true;
-    }
-
     private void ConfirmMarker()
     {
         _markerConfirmed = true;
@@ -389,9 +370,13 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
     private void ShowMarkerPreview()
     {
+        var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
+        if (targetCamera == null)
+            return;
+
         EnsurePreviewCube();
 
-        if (!_hasTagPose || !_hasDetectionCameraPose)
+        if (!_hasTagPose)
             return;
 
         // OpenCV returns right/down/forward camera coordinates. Unity camera-local
@@ -410,11 +395,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
         var cubeLocalPosition = tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f);
         var cubeLocalRotation = Quaternion.LookRotation(tagNormal, tagUp);
-        var cubeWorldPosition = _detectionCameraPosition + _detectionCameraRotation * cubeLocalPosition;
-        var cubeWorldRotation = _detectionCameraRotation * cubeLocalRotation;
+        var cubeWorldPosition = targetCamera.transform.TransformPoint(cubeLocalPosition);
+        var cubeWorldRotation = targetCamera.transform.rotation * cubeLocalRotation;
 
-        // The world pose uses the camera transform captured with the CPU image, rather
-        // than the later transform after native detection has completed.
+        // The AprilTag pose is recalculated from the current camera frame, so it must
+        // drive the preview directly rather than being converted into a one-time AR anchor.
         _previewCube.transform.SetParent(null, true);
         _previewCube.transform.SetPositionAndRotation(cubeWorldPosition, cubeWorldRotation);
         _previewCube.transform.localScale = Vector3.one * PreviewCubeSizeMeters;
