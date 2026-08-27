@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Generic;
 using Unity.Collections;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -33,6 +34,14 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float MarkerLostTimeoutSeconds = 0.2f;
     private const int PoseCandidateStride = 13;
     private const int MaximumPoseCandidates = 2;
+    private const int MaximumCameraPoseSamples = 12;
+    private const long MaximumImagePoseTimestampDeltaNs = 50_000_000L;
+    private const float MinimumCameraFacingDot = 0.5f;
+    private const float MinimumWorldNormalContinuityDot = 0.5f;
+    private const float CandidateSwitchPenalty = 0.35f;
+    private const float DebugAxisLengthMeters = 0.07f;
+    private const float DebugAxisThicknessMeters = 0.008f;
+    private static readonly Vector3 DebugAxisOrigin = new(-0.085f, -0.085f, 0.002f);
 
     [SerializeField] private ARCameraManager cameraManager;
     [SerializeField] [Min(0.01f)] private float detectionIntervalSeconds = 0.03f;
@@ -41,9 +50,13 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
     private readonly float[] _nativeDetection = new float[12];
     private readonly float[] _nativePoseCandidates = new float[PoseCandidateStride * MaximumPoseCandidates];
+    private readonly float[] _selectedRawPose = new float[PoseCandidateStride];
+    private readonly float[] _refinedPose = new float[PoseCandidateStride];
+    private readonly List<CameraPoseSample> _cameraPoseSamples = new(MaximumCameraPoseSamples);
     private Text _statusLabel;
     private Button _connectDroneButton;
     private GameObject _previewCube;
+    private GameObject _markerAxes;
     private ARTrackedImageManager _trackedImageManager;
     private Texture2D _runtimeReferenceTexture;
     private int _consecutiveMatches;
@@ -57,6 +70,19 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private Vector3 _selectedCubeWorldPosition;
     private Quaternion _selectedCubeWorldRotation;
     private bool _hasTrackedTagWorldPose;
+    private int _selectedPoseCandidateIndex = -1;
+
+    private readonly struct CameraPoseSample
+    {
+        public CameraPoseSample(long timestampNs, Pose pose)
+        {
+            TimestampNs = timestampNs;
+            Pose = pose;
+        }
+
+        public long TimestampNs { get; }
+        public Pose Pose { get; }
+    }
 
     private void Awake()
     {
@@ -64,6 +90,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         cameraManager ??= FindAnyObjectByType<ARCameraManager>();
         CreateUi();
         AprilTagScanSession.Clear();
+        if (!DJIAprilTagNative.ValidatePoseConvention() || !ValidateUnityPoseConvention())
+            SetStatus("Az AprilTag IPPE koordináta-önellenőrzése hibát jelzett.");
     }
 
     private void OnEnable()
@@ -85,8 +113,10 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         DJIAprilTagNative.ReleaseDetector();
     }
 
-    private void OnCameraFrameReceived(ARCameraFrameEventArgs _)
+    private void OnCameraFrameReceived(ARCameraFrameEventArgs frame)
     {
+        RecordCameraPose(frame.timestampNs);
+
         if (cameraManager != null && cameraManager.TryGetIntrinsics(out var intrinsics) &&
             intrinsics.resolution.x > 0 && intrinsics.resolution.y > 0 &&
             intrinsics.focalLength.x > 0f && intrinsics.focalLength.y > 0f)
@@ -96,6 +126,48 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         }
     }
 
+    private void RecordCameraPose(long? timestampNs)
+    {
+        if (!timestampNs.HasValue)
+            return;
+
+        var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
+        if (targetCamera == null)
+            return;
+
+        var sample = new CameraPoseSample(timestampNs.Value, new Pose(targetCamera.transform.position, targetCamera.transform.rotation));
+        if (_cameraPoseSamples.Count > 0 && _cameraPoseSamples[^1].TimestampNs == sample.TimestampNs)
+        {
+            _cameraPoseSamples[^1] = sample;
+            return;
+        }
+
+        _cameraPoseSamples.Add(sample);
+        if (_cameraPoseSamples.Count > MaximumCameraPoseSamples)
+            _cameraPoseSamples.RemoveAt(0);
+    }
+
+    private bool TryGetSynchronizedCameraPose(double imageTimestampSeconds, out Pose cameraPose, out long timestampDeltaNs)
+    {
+        cameraPose = default;
+        timestampDeltaNs = long.MaxValue;
+        if (imageTimestampSeconds <= 0d || _cameraPoseSamples.Count == 0)
+            return false;
+
+        var imageTimestampNs = checked((long)System.Math.Round(imageTimestampSeconds * 1_000_000_000d));
+        foreach (var sample in _cameraPoseSamples)
+        {
+            var delta = System.Math.Abs(sample.TimestampNs - imageTimestampNs);
+            if (delta >= timestampDeltaNs)
+                continue;
+
+            cameraPose = sample.Pose;
+            timestampDeltaNs = delta;
+        }
+
+        return timestampDeltaNs <= MaximumImagePoseTimestampDeltaNs;
+    }
+
     private void Update()
     {
         // A stale pose would make the cube appear attached even after the marker leaves the frame.
@@ -103,7 +175,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             Time.unscaledTime - _lastPoseUpdateTime > MarkerLostTimeoutSeconds)
         {
             _previewCube.SetActive(false);
-            _hasTrackedTagWorldPose = false;
+            if (_markerAxes != null)
+                _markerAxes.SetActive(false);
         }
     }
 
@@ -264,6 +337,13 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
             try
             {
+                if (!TryGetSynchronizedCameraPose(image.timestamp, out var cameraPose, out var poseTimestampDeltaNs))
+                {
+                    SetStatus("A CPU-képhez illeszkedő ARCore kamera-pózra várakozás...");
+                    yield return new WaitForSecondsRealtime(detectionIntervalSeconds);
+                    continue;
+                }
+
                 // ARCore intrinsics describe this unrotated CPU image, not the display texture.
                 var conversion = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32)
                 {
@@ -298,7 +378,16 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                             PrintedTagSizeMeters,
                             _nativeDetection,
                             _nativePoseCandidates);
-                        _hasTagPose = TrySelectWorldPose(poseCandidateCount);
+                        _hasTagPose = TrySelectWorldPose(
+                            poseCandidateCount,
+                            cameraPose,
+                            poseTimestampDeltaNs,
+                            conversion.outputDimensions.x,
+                            conversion.outputDimensions.y,
+                            fx,
+                            fy,
+                            cx,
+                            cy);
                         tagDetected = _hasTagPose || Mathf.RoundToInt(_nativeDetection[0]) == targetTagId;
                     }
                     else
@@ -404,82 +493,209 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _lastPoseUpdateTime = Time.unscaledTime;
     }
 
-    private bool TrySelectWorldPose(int poseCandidateCount)
+    private bool TrySelectWorldPose(
+        int poseCandidateCount,
+        Pose cameraPose,
+        long poseTimestampDeltaNs,
+        int imageWidth,
+        int imageHeight,
+        float fx,
+        float fy,
+        float cx,
+        float cy)
     {
-        var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
-        if (targetCamera == null)
-            return false;
-
         var bestScore = float.PositiveInfinity;
-        var hasBestCandidate = false;
+        var bestCandidateIndex = -1;
         var bestTagPosition = Vector3.zero;
         var bestTagRotation = Quaternion.identity;
-        var bestCubePosition = Vector3.zero;
-        var bestCubeRotation = Quaternion.identity;
         var candidateLimit = Mathf.Min(poseCandidateCount, MaximumPoseCandidates);
 
         for (var candidateIndex = 0; candidateIndex < candidateLimit; ++candidateIndex)
         {
             var offset = candidateIndex * PoseCandidateStride;
-            var reprojectionError = _nativePoseCandidates[offset + 12];
-            if (float.IsNaN(reprojectionError) || float.IsInfinity(reprojectionError))
+            if (!TryReadCameraTagPose(_nativePoseCandidates, offset, out var tagPosition, out _, out var tagUp, out var tagNormal, out var reprojectionError))
                 continue;
 
-            // OpenCV uses right/down/forward camera coordinates; Unity uses right/up/forward.
-            var tagPosition = new Vector3(
-                _nativePoseCandidates[offset],
-                -_nativePoseCandidates[offset + 1],
-                _nativePoseCandidates[offset + 2]);
-            var tagRight = new Vector3(
-                _nativePoseCandidates[offset + 3],
-                -_nativePoseCandidates[offset + 6],
-                _nativePoseCandidates[offset + 9]).normalized;
-            var tagUp = Vector3.ProjectOnPlane(new Vector3(
-                _nativePoseCandidates[offset + 4],
-                -_nativePoseCandidates[offset + 7],
-                _nativePoseCandidates[offset + 10]), tagRight).normalized;
-            var tagNormal = Vector3.Cross(tagRight, tagUp).normalized;
-            if (!IsFinite(tagPosition) || !IsFinite(tagRight) || !IsFinite(tagUp) || !IsFinite(tagNormal) ||
-                tagRight.sqrMagnitude < 0.9f || tagUp.sqrMagnitude < 0.9f || tagNormal.sqrMagnitude < 0.9f)
+            var cameraFacingDot = -Vector3.Dot(tagNormal, tagPosition.normalized);
+            if (cameraFacingDot < MinimumCameraFacingDot)
+                continue;
+
+            var tagWorldPosition = cameraPose.position + cameraPose.rotation * tagPosition;
+            var tagWorldRotation = cameraPose.rotation * Quaternion.LookRotation(tagNormal, tagUp);
+            if (_hasTrackedTagWorldPose &&
+                Vector3.Dot(tagWorldRotation * Vector3.forward, _trackedTagWorldRotation * Vector3.forward) < MinimumWorldNormalContinuityDot)
             {
                 continue;
             }
 
-            var tagWorldPosition = targetCamera.transform.TransformPoint(tagPosition);
-            var tagWorldRotation = targetCamera.transform.rotation * Quaternion.LookRotation(tagNormal, tagUp);
-            var cubeWorldPosition = targetCamera.transform.TransformPoint(tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f));
-            // Convert from the marker basis (forward = outward normal) to a Unity cube
-            // basis (up = outward normal), so the cube's bottom face lies on the tag.
-            var cubeWorldRotation = tagWorldRotation * Quaternion.AngleAxis(90f, Vector3.right);
-
-            // A fixed marker should retain the same ARCore world pose between frames.
             var score = reprojectionError * 0.02f;
             if (_hasTrackedTagWorldPose)
             {
                 score += Vector3.Distance(tagWorldPosition, _trackedTagWorldPosition) / 0.04f;
                 score += Quaternion.Angle(tagWorldRotation, _trackedTagWorldRotation) / 15f;
             }
+            if (_selectedPoseCandidateIndex >= 0 && candidateIndex != _selectedPoseCandidateIndex)
+                score += CandidateSwitchPenalty;
 
             if (score >= bestScore)
                 continue;
 
             bestScore = score;
-            hasBestCandidate = true;
+            bestCandidateIndex = candidateIndex;
             bestTagPosition = tagWorldPosition;
             bestTagRotation = tagWorldRotation;
-            bestCubePosition = cubeWorldPosition;
-            bestCubeRotation = cubeWorldRotation;
         }
 
-        if (!hasBestCandidate)
+        if (bestCandidateIndex < 0)
+        {
+            if (_hasTrackedTagWorldPose)
+            {
+                Debug.LogWarning("AprilTag PnP candidate rejected; keeping the last valid world pose.");
+                return true;
+            }
+
+            return false;
+        }
+
+        var selectedOffset = bestCandidateIndex * PoseCandidateStride;
+        for (var poseIndex = 0; poseIndex < PoseCandidateStride; ++poseIndex)
+            _selectedRawPose[poseIndex] = _nativePoseCandidates[selectedOffset + poseIndex];
+
+        if (!DJIAprilTagNative.TryRefinePoseCandidate(
+                imageWidth,
+                imageHeight,
+                fx,
+                fy,
+                cx,
+                cy,
+                PrintedTagSizeMeters,
+                _nativeDetection,
+                _selectedRawPose,
+                _refinedPose) ||
+            !TryReadCameraTagPose(_refinedPose, 0, out var refinedTagPosition, out _, out var refinedTagUp, out var refinedTagNormal, out _))
+        {
+            return _hasTrackedTagWorldPose;
+        }
+
+        var refinedFacingDot = -Vector3.Dot(refinedTagNormal, refinedTagPosition.normalized);
+        var refinedTagWorldRotation = cameraPose.rotation * Quaternion.LookRotation(refinedTagNormal, refinedTagUp);
+        if (refinedFacingDot < MinimumCameraFacingDot ||
+            (_hasTrackedTagWorldPose &&
+             Vector3.Dot(refinedTagWorldRotation * Vector3.forward, _trackedTagWorldRotation * Vector3.forward) < MinimumWorldNormalContinuityDot))
+        {
+            Debug.LogWarning("AprilTag refinement changed the selected normal; keeping the raw world-pose prediction.");
+            return _hasTrackedTagWorldPose;
+        }
+
+        _trackedTagWorldPosition = cameraPose.position + cameraPose.rotation * refinedTagPosition;
+        _trackedTagWorldRotation = refinedTagWorldRotation;
+        _selectedCubeWorldPosition = cameraPose.position + cameraPose.rotation * (refinedTagPosition + refinedTagNormal * (PreviewCubeSizeMeters * 0.5f));
+        _selectedCubeWorldRotation = refinedTagWorldRotation * Quaternion.AngleAxis(90f, Vector3.right);
+        _hasTrackedTagWorldPose = true;
+
+        var candidateChanged = _selectedPoseCandidateIndex != bestCandidateIndex;
+        _selectedPoseCandidateIndex = bestCandidateIndex;
+        UpdateMarkerAxes(_trackedTagWorldPosition, _trackedTagWorldRotation);
+        if (candidateChanged)
+        {
+            Debug.Log($"AprilTag candidate {bestCandidateIndex}: score {bestScore:F3}, normal {refinedFacingDot:F3}, image-pose delta {poseTimestampDeltaNs / 1_000_000f:F1} ms.");
+        }
+        return true;
+    }
+
+    private static bool TryReadCameraTagPose(
+        float[] pose,
+        int offset,
+        out Vector3 tagPosition,
+        out Vector3 tagRight,
+        out Vector3 tagUp,
+        out Vector3 tagNormal,
+        out float reprojectionError)
+    {
+        tagPosition = tagRight = tagUp = tagNormal = Vector3.zero;
+        reprojectionError = float.PositiveInfinity;
+        if (pose == null || offset < 0 || offset + PoseCandidateStride > pose.Length)
             return false;
 
-        _trackedTagWorldPosition = bestTagPosition;
-        _trackedTagWorldRotation = bestTagRotation;
-        _selectedCubeWorldPosition = bestCubePosition;
-        _selectedCubeWorldRotation = bestCubeRotation;
-        _hasTrackedTagWorldPose = true;
-        return true;
+        reprojectionError = pose[offset + 12];
+        if (float.IsNaN(reprojectionError) || float.IsInfinity(reprojectionError))
+            return false;
+
+        // Camera and marker axes are converted once here: OpenCV uses +Y down.
+        tagPosition = new Vector3(pose[offset], -pose[offset + 1], pose[offset + 2]);
+        tagRight = new Vector3(pose[offset + 3], -pose[offset + 6], pose[offset + 9]).normalized;
+        tagUp = Vector3.ProjectOnPlane(new Vector3(pose[offset + 4], -pose[offset + 7], pose[offset + 10]), tagRight).normalized;
+        tagNormal = Vector3.Cross(tagRight, tagUp).normalized;
+        return IsFinite(tagPosition) && IsFinite(tagRight) && IsFinite(tagUp) && IsFinite(tagNormal) &&
+               tagRight.sqrMagnitude > 0.9f && tagUp.sqrMagnitude > 0.9f && tagNormal.sqrMagnitude > 0.9f;
+    }
+
+    private static bool ValidateUnityPoseConvention()
+    {
+        var canonicalPose = new float[PoseCandidateStride]
+        {
+            0f, 0f, 0.5f,
+            1f, 0f, 0f,
+            0f, 1f, 0f,
+            0f, 0f, 1f,
+            0f
+        };
+        return TryReadCameraTagPose(canonicalPose, 0, out _, out var right, out var up, out var normal, out _) &&
+               Vector3.Dot(right, Vector3.right) > 0.999f &&
+               Vector3.Dot(up, Vector3.down) > 0.999f &&
+               Vector3.Dot(normal, Vector3.back) > 0.999f;
+    }
+
+    private void UpdateMarkerAxes(Vector3 markerWorldPosition, Quaternion markerWorldRotation)
+    {
+        EnsureMarkerAxes();
+        if (_markerAxes == null)
+            return;
+
+        _markerAxes.transform.SetPositionAndRotation(
+            markerWorldPosition + markerWorldRotation * DebugAxisOrigin,
+            markerWorldRotation);
+        _markerAxes.SetActive(true);
+    }
+
+    private void EnsureMarkerAxes()
+    {
+        if (_markerAxes != null)
+            return;
+
+        var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Universal Render Pipeline/Lit");
+        if (shader == null)
+            return;
+
+        _markerAxes = new GameObject("AprilTag Debug Axes");
+        CreateDebugAxis(_markerAxes.transform, "X", Vector3.right, Color.red, shader);
+        CreateDebugAxis(_markerAxes.transform, "Y", Vector3.up, Color.green, shader);
+        CreateDebugAxis(_markerAxes.transform, "Normal", Vector3.forward, Color.blue, shader);
+    }
+
+    private static void CreateDebugAxis(Transform parent, string name, Vector3 direction, Color color, Shader shader)
+    {
+        var axis = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        axis.name = $"AprilTag Axis {name}";
+        axis.transform.SetParent(parent, false);
+        axis.transform.localPosition = direction * (DebugAxisLengthMeters * 0.5f);
+        axis.transform.localScale = new Vector3(
+            direction.x != 0f ? DebugAxisLengthMeters : DebugAxisThicknessMeters,
+            direction.y != 0f ? DebugAxisLengthMeters : DebugAxisThicknessMeters,
+            direction.z != 0f ? DebugAxisLengthMeters : DebugAxisThicknessMeters);
+
+        var collider = axis.GetComponent<Collider>();
+        if (collider != null)
+            UnityEngine.Object.Destroy(collider);
+
+        var renderer = axis.GetComponent<Renderer>();
+        if (renderer != null)
+        {
+            renderer.material = new Material(shader);
+            renderer.material.color = color;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+        }
     }
 
     private void EnsurePreviewCube()
