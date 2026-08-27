@@ -33,8 +33,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float MarkerLostTimeoutSeconds = 0.2f;
     private const int PoseCandidateStride = 13;
     private const int MaximumPoseCandidates = 2;
-    private const int CameraPoseHistoryCapacity = 32;
-    private const double MaximumCameraPoseAgeSeconds = 0.1;
     private const int PoseSwitchConfirmationFrames = 4;
     private const float MaximumContinuousPositionDeltaMeters = 0.08f;
     private const float MaximumContinuousRotationDeltaDegrees = 35f;
@@ -64,21 +62,12 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private Vector3 _selectedCubeWorldPosition;
     private Quaternion _selectedCubeWorldRotation;
     private bool _hasTrackedTagWorldPose;
-    private readonly CameraPoseSample[] _cameraPoseHistory = new CameraPoseSample[CameraPoseHistoryCapacity];
-    private int _cameraPoseHistoryCount;
-    private int _nextCameraPoseHistoryIndex;
     private Vector3 _pendingTagWorldPosition;
     private Quaternion _pendingTagWorldRotation;
     private int _pendingPoseFrames;
     private bool _hasReceivedCameraFrame;
     private float _cameraStartupTime;
     private float _lastCpuImageScanTime = float.NegativeInfinity;
-
-    private struct CameraPoseSample
-    {
-        public long timestampNs;
-        public Pose pose;
-    }
 
     private void Awake()
     {
@@ -121,8 +110,13 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         }
 
         var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
-        if (targetCamera != null && frameArgs.timestampNs.HasValue)
-            RecordCameraPose(frameArgs.timestampNs.Value, new Pose(targetCamera.transform.position, targetCamera.transform.rotation));
+        if (targetCamera == null)
+            return;
+
+        // The CPU image is acquired below from this exact AR camera callback.
+        // Use the matching callback pose directly instead of comparing timestamps
+        // from potentially different provider clocks.
+        var frameCameraPose = new Pose(targetCamera.transform.position, targetCamera.transform.rotation);
 
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (Time.unscaledTime - _lastCpuImageScanTime < detectionIntervalSeconds)
@@ -137,7 +131,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
         try
         {
-            ProcessCpuImage(image);
+            ProcessCpuImage(image, frameCameraPose);
         }
         finally
         {
@@ -307,7 +301,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 #endif
     }
 
-    private void ProcessCpuImage(XRCpuImage image)
+    private void ProcessCpuImage(XRCpuImage image, Pose frameCameraPose)
     {
         // ARCore intrinsics describe this unrotated CPU image, not the display texture.
         var conversion = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32)
@@ -344,7 +338,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                     PrintedTagSizeMeters,
                     _nativeDetection,
                     _nativePoseCandidates);
-                _hasTagPose = TrySelectWorldPose(poseCandidateCount, image.timestamp);
+                _hasTagPose = TrySelectWorldPose(poseCandidateCount, frameCameraPose);
                 tagDetected = _hasTagPose || Mathf.RoundToInt(_nativeDetection[0]) == targetTagId;
             }
             else
@@ -460,11 +454,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _lastPoseUpdateTime = Time.unscaledTime;
     }
 
-    private bool TrySelectWorldPose(int poseCandidateCount, double imageTimestampSeconds)
+    private bool TrySelectWorldPose(int poseCandidateCount, Pose cameraPose)
     {
-        if (!TryGetCameraPose(imageTimestampSeconds, out var cameraPose))
-            return false;
-
         var bestScore = float.PositiveInfinity;
         var hasBestCandidate = false;
         var bestTagPosition = Vector3.zero;
@@ -569,35 +560,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         // remains on the marker plane. Its local +Z follows the marker's up axis.
         cubeCameraRotation = Quaternion.LookRotation(markerUp, outwardNormal);
         return IsFinite(outwardNormal);
-    }
-
-    private void RecordCameraPose(long timestampNs, Pose pose)
-    {
-        _cameraPoseHistory[_nextCameraPoseHistoryIndex] = new CameraPoseSample { timestampNs = timestampNs, pose = pose };
-        _nextCameraPoseHistoryIndex = (_nextCameraPoseHistoryIndex + 1) % CameraPoseHistoryCapacity;
-        _cameraPoseHistoryCount = Mathf.Min(_cameraPoseHistoryCount + 1, CameraPoseHistoryCapacity);
-    }
-
-    private bool TryGetCameraPose(double imageTimestampSeconds, out Pose cameraPose)
-    {
-        cameraPose = default;
-        if (_cameraPoseHistoryCount == 0 || double.IsNaN(imageTimestampSeconds) || double.IsInfinity(imageTimestampSeconds))
-            return false;
-
-        var imageTimestampNs = (long)System.Math.Round(imageTimestampSeconds * 1_000_000_000d);
-        var bestAgeNs = long.MaxValue;
-        for (var index = 0; index < _cameraPoseHistoryCount; ++index)
-        {
-            var sample = _cameraPoseHistory[index];
-            var ageNs = System.Math.Abs(sample.timestampNs - imageTimestampNs);
-            if (ageNs >= bestAgeNs)
-                continue;
-
-            bestAgeNs = ageNs;
-            cameraPose = sample.pose;
-        }
-
-        return bestAgeNs <= MaximumCameraPoseAgeSeconds * 1_000_000_000d;
     }
 
     private bool IsContinuousPose(Vector3 tagWorldPosition, Quaternion cubeWorldRotation)
