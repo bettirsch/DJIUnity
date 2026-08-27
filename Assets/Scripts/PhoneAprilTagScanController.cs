@@ -17,6 +17,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float ReferenceImageWidthMeters = 0.2f;
     private const float PrintedTagSizeMeters = 0.2f;
     private const float PreviewCubeSizeMeters = 0.14f;
+    private static readonly Color PreviewCubeColor = new(1f, 0.78f, 0.05f, 1f);
     private const int MaxDetectionImageDimension = 960;
     private const float MarkerLostTimeoutSeconds = 0.2f;
 
@@ -197,7 +198,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             if (cubeRenderer != null && shader != null)
             {
                 cubeRenderer.material = new Material(shader);
-                cubeRenderer.material.color = new Color(1f, 0f, 0.78f, 1f);
+                cubeRenderer.material.color = PreviewCubeColor;
                 cubeRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 cubeRenderer.receiveShadows = false;
             }
@@ -423,7 +424,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         if (cubeRenderer != null && shader != null)
         {
             cubeRenderer.material = new Material(shader);
-            cubeRenderer.material.color = new Color(1f, 0f, 0.78f, 1f);
+            cubeRenderer.material.color = PreviewCubeColor;
             cubeRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             cubeRenderer.receiveShadows = false;
         }
