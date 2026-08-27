@@ -41,25 +41,6 @@ internal static class DJIAprilTagNative
         int outDetectionLength,
         float[] outPoseCandidates,
         int outPoseCandidatesLength);
-
-    [DllImport("djiunity")]
-    private static extern int DJI_RefineAprilTagPoseCandidate(
-        int width,
-        int height,
-        float fx,
-        float fy,
-        float cx,
-        float cy,
-        float tagSizeMeters,
-        float[] detection,
-        int detectionLength,
-        float[] initialPose,
-        int initialPoseLength,
-        float[] outPose,
-        int outPoseLength);
-
-    [DllImport("djiunity")]
-    private static extern int DJI_ValidateAprilTagPoseConvention();
 #endif
 
     public static void SetTargetTagId(int tagId)
@@ -153,50 +134,6 @@ internal static class DJIAprilTagNative
             outPoseCandidates.Length);
 #else
         return 0;
-#endif
-    }
-
-    public static bool TryRefinePoseCandidate(
-        int width,
-        int height,
-        float fx,
-        float fy,
-        float cx,
-        float cy,
-        float tagSizeMeters,
-        float[] detection,
-        float[] initialPose,
-        float[] outPose)
-    {
-#if UNITY_ANDROID && !UNITY_EDITOR
-        if (detection == null || initialPose == null || outPose == null)
-            return false;
-
-        return DJI_RefineAprilTagPoseCandidate(
-            width,
-            height,
-            fx,
-            fy,
-            cx,
-            cy,
-            tagSizeMeters,
-            detection,
-            detection.Length,
-            initialPose,
-            initialPose.Length,
-            outPose,
-            outPose.Length) != 0;
-#else
-        return false;
-#endif
-    }
-
-    public static bool ValidatePoseConvention()
-    {
-#if UNITY_ANDROID && !UNITY_EDITOR
-        return DJI_ValidateAprilTagPoseConvention() != 0;
-#else
-        return true;
 #endif
     }
 }
