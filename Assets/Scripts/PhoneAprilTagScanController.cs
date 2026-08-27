@@ -18,6 +18,17 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float PrintedTagSizeMeters = 0.2f;
     private const float PreviewCubeSizeMeters = 0.14f;
     private static readonly Color PreviewCubeColor = new(1f, 0.78f, 0.05f, 1f);
+    private static readonly Color[] PreviewEdgeColors =
+    {
+        new(0.95f, 0.15f, 0.15f, 1f), new(1f, 0.47f, 0.1f, 1f),
+        new(1f, 0.92f, 0.05f, 1f), new(0.35f, 0.9f, 0.1f, 1f),
+        new(0.05f, 0.85f, 0.65f, 1f), new(0.05f, 0.55f, 1f, 1f),
+        new(0.2f, 0.25f, 1f, 1f), new(0.55f, 0.15f, 1f, 1f),
+        new(0.88f, 0.1f, 0.9f, 1f), new(1f, 0.2f, 0.58f, 1f),
+        new(0.72f, 0.38f, 0.12f, 1f), new(0.9f, 0.9f, 0.9f, 1f)
+    };
+    private const float PreviewEdgeThickness = 0.055f;
+    private const float PreviewEdgeLength = 1.04f;
     private const int MaxDetectionImageDimension = 960;
     private const float MarkerLostTimeoutSeconds = 0.2f;
     private const int PoseCandidateStride = 13;
@@ -504,7 +515,50 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             cubeRenderer.material.color = PreviewCubeColor;
             cubeRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             cubeRenderer.receiveShadows = false;
+            CreatePreviewEdges(_previewCube.transform, shader);
         }
+    }
+
+    private static void CreatePreviewEdges(Transform parent, Shader shader)
+    {
+        const float half = 0.5f;
+        var edgeIndex = 0;
+
+        for (var y = -1; y <= 1; y += 2)
+        for (var z = -1; z <= 1; z += 2)
+            CreatePreviewEdge(parent, ref edgeIndex, new Vector3(0f, y * half, z * half), new Vector3(PreviewEdgeLength, PreviewEdgeThickness, PreviewEdgeThickness), shader);
+
+        for (var x = -1; x <= 1; x += 2)
+        for (var z = -1; z <= 1; z += 2)
+            CreatePreviewEdge(parent, ref edgeIndex, new Vector3(x * half, 0f, z * half), new Vector3(PreviewEdgeThickness, PreviewEdgeLength, PreviewEdgeThickness), shader);
+
+        for (var x = -1; x <= 1; x += 2)
+        for (var y = -1; y <= 1; y += 2)
+            CreatePreviewEdge(parent, ref edgeIndex, new Vector3(x * half, y * half, 0f), new Vector3(PreviewEdgeThickness, PreviewEdgeThickness, PreviewEdgeLength), shader);
+    }
+
+    private static void CreatePreviewEdge(Transform parent, ref int edgeIndex, Vector3 localPosition, Vector3 localScale, Shader shader)
+    {
+        var edge = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        edge.name = $"Preview Edge {edgeIndex + 1}";
+        edge.transform.SetParent(parent, false);
+        edge.transform.localPosition = localPosition;
+        edge.transform.localScale = localScale;
+
+        var collider = edge.GetComponent<Collider>();
+        if (collider != null)
+            UnityEngine.Object.Destroy(collider);
+
+        var renderer = edge.GetComponent<Renderer>();
+        if (renderer != null)
+        {
+            renderer.material = new Material(shader);
+            renderer.material.color = PreviewEdgeColors[edgeIndex];
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+        }
+
+        ++edgeIndex;
     }
 
     private static bool IsFinite(Vector3 value)
