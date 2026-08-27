@@ -36,8 +36,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private bool _markerConfirmed;
     private bool _hasTagPose;
     private float _lastPoseUpdateTime = float.NegativeInfinity;
-    private Vector2Int _lastDetectionImageSize;
-    private float _lastDetectionFx;
+    private XRCameraIntrinsics _cachedIntrinsics;
+    private bool _hasCachedIntrinsics;
 
     private void Awake()
     {
@@ -50,15 +50,31 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private void OnEnable()
     {
         DJIAprilTagNative.SetTargetTagId(targetTagId);
+        cameraManager ??= FindAnyObjectByType<ARCameraManager>();
+        if (cameraManager != null)
+            cameraManager.frameReceived += OnCameraFrameReceived;
         StartCoroutine(ScanLoop());
     }
 
     private void OnDisable()
     {
         StopAllCoroutines();
+        if (cameraManager != null)
+            cameraManager.frameReceived -= OnCameraFrameReceived;
         if (_trackedImageManager != null)
             _trackedImageManager.trackablesChanged.RemoveListener(OnTrackedImagesChanged);
         DJIAprilTagNative.ReleaseDetector();
+    }
+
+    private void OnCameraFrameReceived(ARCameraFrameEventArgs _)
+    {
+        if (cameraManager != null && cameraManager.TryGetIntrinsics(out var intrinsics) &&
+            intrinsics.resolution.x > 0 && intrinsics.resolution.y > 0 &&
+            intrinsics.focalLength.x > 0f && intrinsics.focalLength.y > 0f)
+        {
+            _cachedIntrinsics = intrinsics;
+            _hasCachedIntrinsics = true;
+        }
     }
 
     private void Update()
@@ -226,7 +242,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
             try
             {
-                var conversion = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32);
+                // ARCore intrinsics describe this unrotated CPU image, not the display texture.
+                var conversion = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32)
+                {
+                    transformation = XRCpuImage.Transformation.None
+                };
                 var largestImageDimension = Mathf.Max(image.width, image.height);
                 if (largestImageDimension > MaxDetectionImageDimension)
                 {
@@ -236,16 +256,16 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                         Mathf.RoundToInt(image.height * scale));
                 }
                 var pixels = new NativeArray<byte>(image.GetConvertedDataSize(conversion), Allocator.Temp);
-                bool detected;
+                bool tagDetected;
+                bool hasExactCalibration;
                 try
                 {
                     image.Convert(conversion, pixels);
                     var rgbaBytes = pixels.ToArray();
-                    if (TryGetCameraCalibration(conversion.outputDimensions, out var fx, out var fy, out var cx, out var cy))
+                    hasExactCalibration = TryGetCameraCalibration(conversion.outputDimensions, out var fx, out var fy, out var cx, out var cy);
+                    if (hasExactCalibration)
                     {
-                        _lastDetectionImageSize = conversion.outputDimensions;
-                        _lastDetectionFx = fx;
-                        detected = DJIAprilTagNative.TryDetectPose(
+                        _hasTagPose = DJIAprilTagNative.TryDetectPose(
                             rgbaBytes,
                             conversion.outputDimensions.x,
                             conversion.outputDimensions.y,
@@ -256,13 +276,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                             PrintedTagSizeMeters,
                             _nativeDetection,
                             _nativePose);
-                        _hasTagPose = detected;
-                        if (!detected && Mathf.RoundToInt(_nativeDetection[0]) == targetTagId)
-                            detected = true;
+                        tagDetected = _hasTagPose || Mathf.RoundToInt(_nativeDetection[0]) == targetTagId;
                     }
                     else
                     {
-                        detected = DJIAprilTagNative.TryDetect(rgbaBytes, conversion.outputDimensions.x, conversion.outputDimensions.y, _nativeDetection);
+                        tagDetected = DJIAprilTagNative.TryDetect(rgbaBytes, conversion.outputDimensions.x, conversion.outputDimensions.y, _nativeDetection);
                         _hasTagPose = false;
                     }
                 }
@@ -271,7 +289,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                     pixels.Dispose();
                 }
 
-                if (detected)
+                if (tagDetected && _hasTagPose)
                 {
                     if (!_markerConfirmed)
                     {
@@ -283,6 +301,13 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
                     if (_markerConfirmed)
                         ShowMarkerPreview();
+                }
+                else if (tagDetected)
+                {
+                    _consecutiveMatches = 0;
+                    SetStatus(hasExactCalibration
+                        ? "AprilTag felismerve, de a validált PnP pózt elutasította. Tartsa a teljes markert jól megvilágítva a képben."
+                        : "AprilTag felismerve. Várakozás az ARCore pontos kamera-kalibrációjára.");
                 }
                 else
                 {
@@ -309,45 +334,28 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
     private bool TryGetCameraCalibration(Vector2Int imageSize, out float fx, out float fy, out float cx, out float cy)
     {
-        if (cameraManager.TryGetIntrinsics(out var intrinsics) &&
-            intrinsics.resolution.x > 0 && intrinsics.resolution.y > 0)
+        if (!_hasCachedIntrinsics || _cachedIntrinsics.resolution.x <= 0 || _cachedIntrinsics.resolution.y <= 0)
         {
-            var imageToIntrinsicsScale = new Vector2(
-                imageSize.x / (float)intrinsics.resolution.x,
-                imageSize.y / (float)intrinsics.resolution.y);
-            fx = intrinsics.focalLength.x * imageToIntrinsicsScale.x;
-            fy = intrinsics.focalLength.y * imageToIntrinsicsScale.y;
-            cx = intrinsics.principalPoint.x * imageToIntrinsicsScale.x;
-            cy = intrinsics.principalPoint.y * imageToIntrinsicsScale.y;
-            return fx > 0f && fy > 0f;
+            fx = fy = cx = cy = 0f;
+            return false;
         }
 
-        var arCamera = cameraManager.GetComponent<Camera>() ?? Camera.main;
-        if (arCamera != null)
+        var intrinsicsAspect = _cachedIntrinsics.resolution.x / (float)_cachedIntrinsics.resolution.y;
+        var imageAspect = imageSize.x / (float)imageSize.y;
+        if (Mathf.Abs(intrinsicsAspect - imageAspect) > 0.01f)
         {
-            var projection = arCamera.projectionMatrix;
-            fx = Mathf.Abs(projection.m00) * imageSize.x * 0.5f;
-            fy = Mathf.Abs(projection.m11) * imageSize.y * 0.5f;
-            if (fx > 0.001f && fy > 0.001f)
-            {
-                // CPU images can have a different orientation than the display, so use
-                // the image center rather than display-space principal point offsets.
-                cx = imageSize.x * 0.5f;
-                cy = imageSize.y * 0.5f;
-                return true;
-            }
+            fx = fy = cx = cy = 0f;
+            return false;
         }
 
-        // Some ARCore devices expose CPU images before either intrinsics or a
-        // usable projection matrix. A nominal rear-camera model still lets the
-        // AprilTag solver produce a pose instead of disabling the preview.
-        const float fallbackVerticalFieldOfViewDegrees = 60f;
-        var halfVerticalFieldOfViewRadians = fallbackVerticalFieldOfViewDegrees * Mathf.Deg2Rad * 0.5f;
-        fy = imageSize.y * 0.5f / Mathf.Tan(halfVerticalFieldOfViewRadians);
-        fx = fy * imageSize.x / imageSize.y;
-        cx = imageSize.x * 0.5f;
-        cy = imageSize.y * 0.5f;
-        return true;
+        var imageToIntrinsicsScale = new Vector2(
+            imageSize.x / (float)_cachedIntrinsics.resolution.x,
+            imageSize.y / (float)_cachedIntrinsics.resolution.y);
+        fx = _cachedIntrinsics.focalLength.x * imageToIntrinsicsScale.x;
+        fy = _cachedIntrinsics.focalLength.y * imageToIntrinsicsScale.y;
+        cx = _cachedIntrinsics.principalPoint.x * imageToIntrinsicsScale.x;
+        cy = _cachedIntrinsics.principalPoint.y * imageToIntrinsicsScale.y;
+        return fx > 0f && fy > 0f;
     }
 
     private void ConfirmMarker()
@@ -368,21 +376,19 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         EnsurePreviewCube();
 
         if (!_hasTagPose)
-        {
-            ShowCornerTrackedPreview(targetCamera);
             return;
-        }
 
-        var tagPosition = new Vector3(_nativePose[0], _nativePose[1], -_nativePose[2]);
-        var tagRight = new Vector3(_nativePose[3], _nativePose[6], -_nativePose[9]).normalized;
+        // OpenCV returns right/down/forward camera coordinates. Unity camera-local
+        // coordinates are right/up/forward, so only the camera Y axis is inverted.
+        var tagPosition = new Vector3(_nativePose[0], -_nativePose[1], _nativePose[2]);
+        var tagRight = new Vector3(_nativePose[3], -_nativePose[6], _nativePose[9]).normalized;
         var tagUp = Vector3.ProjectOnPlane(
-            new Vector3(_nativePose[4], _nativePose[7], -_nativePose[10]),
+            new Vector3(_nativePose[4], -_nativePose[7], _nativePose[10]),
             tagRight).normalized;
         var tagNormal = Vector3.Cross(tagRight, tagUp).normalized;
         if (!IsFinite(tagPosition) || !IsFinite(tagRight) || !IsFinite(tagUp) || !IsFinite(tagNormal) ||
             tagRight.sqrMagnitude < 0.9f || tagUp.sqrMagnitude < 0.9f || tagNormal.sqrMagnitude < 0.9f)
         {
-            ShowCornerTrackedPreview(targetCamera);
             return;
         }
 
@@ -421,36 +427,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             cubeRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             cubeRenderer.receiveShadows = false;
         }
-    }
-
-    private void ShowCornerTrackedPreview(Camera targetCamera)
-    {
-        if (_previewCube == null || _lastDetectionImageSize.x <= 0 || _lastDetectionImageSize.y <= 0 || _lastDetectionFx <= 0f)
-            return;
-
-        var topWidthPixels = Vector2.Distance(
-            new Vector2(_nativeDetection[3] * _lastDetectionImageSize.x, _nativeDetection[4] * _lastDetectionImageSize.y),
-            new Vector2(_nativeDetection[5] * _lastDetectionImageSize.x, _nativeDetection[6] * _lastDetectionImageSize.y));
-        var bottomWidthPixels = Vector2.Distance(
-            new Vector2(_nativeDetection[9] * _lastDetectionImageSize.x, _nativeDetection[10] * _lastDetectionImageSize.y),
-            new Vector2(_nativeDetection[7] * _lastDetectionImageSize.x, _nativeDetection[8] * _lastDetectionImageSize.y));
-        var tagWidthPixels = (topWidthPixels + bottomWidthPixels) * 0.5f;
-        if (tagWidthPixels < 1f)
-            return;
-
-        var depth = Mathf.Clamp(PrintedTagSizeMeters * _lastDetectionFx / tagWidthPixels, 0.15f, 15f);
-        var viewportPosition = new Vector3(
-            Mathf.Clamp01(_nativeDetection[1]),
-            Mathf.Clamp01(1f - _nativeDetection[2]),
-            depth + PreviewCubeSizeMeters * 0.5f);
-
-        _previewCube.transform.SetParent(null, true);
-        _previewCube.transform.SetPositionAndRotation(
-            targetCamera.ViewportToWorldPoint(viewportPosition),
-            targetCamera.transform.rotation);
-        _previewCube.transform.localScale = Vector3.one * PreviewCubeSizeMeters;
-        _previewCube.SetActive(true);
-        _lastPoseUpdateTime = Time.unscaledTime;
     }
 
     private static bool IsFinite(Vector3 value)
