@@ -36,6 +36,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private bool _markerConfirmed;
     private bool _hasTagPose;
     private float _lastPoseUpdateTime = float.NegativeInfinity;
+    private Vector2Int _lastDetectionImageSize;
+    private float _lastDetectionFx;
 
     private void Awake()
     {
@@ -241,6 +243,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                     var rgbaBytes = pixels.ToArray();
                     if (TryGetCameraCalibration(conversion.outputDimensions, out var fx, out var fy, out var cx, out var cy))
                     {
+                        _lastDetectionImageSize = conversion.outputDimensions;
+                        _lastDetectionFx = fx;
                         detected = DJIAprilTagNative.TryDetectPose(
                             rgbaBytes,
                             conversion.outputDimensions.x,
@@ -253,6 +257,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                             _nativeDetection,
                             _nativePose);
                         _hasTagPose = detected;
+                        if (!detected && Mathf.RoundToInt(_nativeDetection[0]) == targetTagId)
+                            detected = true;
                     }
                     else
                     {
@@ -356,27 +362,15 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private void ShowMarkerPreview()
     {
         var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
-        if (targetCamera == null || !_hasTagPose)
+        if (targetCamera == null)
             return;
 
-        if (_previewCube == null)
+        EnsurePreviewCube();
+
+        if (!_hasTagPose)
         {
-            _previewCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            _previewCube.name = PreviewCubeName;
-
-            var collider = _previewCube.GetComponent<Collider>();
-            if (collider != null)
-                Destroy(collider);
-
-            var cubeRenderer = _previewCube.GetComponent<Renderer>();
-            var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Universal Render Pipeline/Lit");
-            if (cubeRenderer != null && shader != null)
-            {
-                cubeRenderer.material = new Material(shader);
-                cubeRenderer.material.color = new Color(1f, 0f, 0.78f, 1f);
-                cubeRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                cubeRenderer.receiveShadows = false;
-            }
+            ShowCornerTrackedPreview(targetCamera);
+            return;
         }
 
         var tagPosition = new Vector3(_nativePose[0], _nativePose[1], -_nativePose[2]);
@@ -385,8 +379,12 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             new Vector3(_nativePose[4], _nativePose[7], -_nativePose[10]),
             tagRight).normalized;
         var tagNormal = Vector3.Cross(tagRight, tagUp).normalized;
-        if (tagRight.sqrMagnitude < 0.9f || tagUp.sqrMagnitude < 0.9f || tagNormal.sqrMagnitude < 0.9f)
+        if (!IsFinite(tagPosition) || !IsFinite(tagRight) || !IsFinite(tagUp) || !IsFinite(tagNormal) ||
+            tagRight.sqrMagnitude < 0.9f || tagUp.sqrMagnitude < 0.9f || tagNormal.sqrMagnitude < 0.9f)
+        {
+            ShowCornerTrackedPreview(targetCamera);
             return;
+        }
 
         var cubeLocalPosition = tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f);
         var cubeLocalRotation = Quaternion.LookRotation(tagNormal, tagUp);
@@ -400,6 +398,66 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _previewCube.transform.localScale = Vector3.one * PreviewCubeSizeMeters;
         _previewCube.SetActive(true);
         _lastPoseUpdateTime = Time.unscaledTime;
+    }
+
+    private void EnsurePreviewCube()
+    {
+        if (_previewCube != null)
+            return;
+
+        _previewCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        _previewCube.name = PreviewCubeName;
+
+        var collider = _previewCube.GetComponent<Collider>();
+        if (collider != null)
+            Destroy(collider);
+
+        var cubeRenderer = _previewCube.GetComponent<Renderer>();
+        var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Universal Render Pipeline/Lit");
+        if (cubeRenderer != null && shader != null)
+        {
+            cubeRenderer.material = new Material(shader);
+            cubeRenderer.material.color = new Color(1f, 0f, 0.78f, 1f);
+            cubeRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            cubeRenderer.receiveShadows = false;
+        }
+    }
+
+    private void ShowCornerTrackedPreview(Camera targetCamera)
+    {
+        if (_previewCube == null || _lastDetectionImageSize.x <= 0 || _lastDetectionImageSize.y <= 0 || _lastDetectionFx <= 0f)
+            return;
+
+        var topWidthPixels = Vector2.Distance(
+            new Vector2(_nativeDetection[3] * _lastDetectionImageSize.x, _nativeDetection[4] * _lastDetectionImageSize.y),
+            new Vector2(_nativeDetection[5] * _lastDetectionImageSize.x, _nativeDetection[6] * _lastDetectionImageSize.y));
+        var bottomWidthPixels = Vector2.Distance(
+            new Vector2(_nativeDetection[9] * _lastDetectionImageSize.x, _nativeDetection[10] * _lastDetectionImageSize.y),
+            new Vector2(_nativeDetection[7] * _lastDetectionImageSize.x, _nativeDetection[8] * _lastDetectionImageSize.y));
+        var tagWidthPixels = (topWidthPixels + bottomWidthPixels) * 0.5f;
+        if (tagWidthPixels < 1f)
+            return;
+
+        var depth = Mathf.Clamp(PrintedTagSizeMeters * _lastDetectionFx / tagWidthPixels, 0.15f, 15f);
+        var viewportPosition = new Vector3(
+            Mathf.Clamp01(_nativeDetection[1]),
+            Mathf.Clamp01(1f - _nativeDetection[2]),
+            depth + PreviewCubeSizeMeters * 0.5f);
+
+        _previewCube.transform.SetParent(null, true);
+        _previewCube.transform.SetPositionAndRotation(
+            targetCamera.ViewportToWorldPoint(viewportPosition),
+            targetCamera.transform.rotation);
+        _previewCube.transform.localScale = Vector3.one * PreviewCubeSizeMeters;
+        _previewCube.SetActive(true);
+        _lastPoseUpdateTime = Time.unscaledTime;
+    }
+
+    private static bool IsFinite(Vector3 value)
+    {
+        return !float.IsNaN(value.x) && !float.IsInfinity(value.x) &&
+               !float.IsNaN(value.y) && !float.IsInfinity(value.y) &&
+               !float.IsNaN(value.z) && !float.IsInfinity(value.z);
     }
 
     private void LoadDroneView()
