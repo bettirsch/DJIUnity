@@ -282,9 +282,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                 {
                     if (_markerConfirmed)
                     {
-                        SetStatus(_hasTagPose
-                            ? "Marker rögzítve. Tartsa az AprilTag-et a telefon kameraképében."
-                            : "Marker felismerve, de a telefon kamerakalibrációja még nem érhető el.");
+                        SetStatus("Tartsa az AprilTag-et a telefon kameraképében.");
                     }
                     else
                     {
@@ -334,11 +332,16 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             }
         }
 
-        fx = 0f;
-        fy = 0f;
-        cx = 0f;
-        cy = 0f;
-        return false;
+        // Some ARCore devices expose CPU images before either intrinsics or a
+        // usable projection matrix. A nominal rear-camera model still lets the
+        // AprilTag solver produce a pose instead of disabling the preview.
+        const float fallbackVerticalFieldOfViewDegrees = 60f;
+        var halfVerticalFieldOfViewRadians = fallbackVerticalFieldOfViewDegrees * Mathf.Deg2Rad * 0.5f;
+        fy = imageSize.y * 0.5f / Mathf.Tan(halfVerticalFieldOfViewRadians);
+        fx = fy * imageSize.x / imageSize.y;
+        cx = imageSize.x * 0.5f;
+        cy = imageSize.y * 0.5f;
+        return true;
     }
 
     private void ConfirmMarker()
