@@ -72,6 +72,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private int _pendingPoseFrames;
     private bool _hasReceivedCameraFrame;
     private float _cameraStartupTime;
+    private float _lastCpuImageScanTime = float.NegativeInfinity;
 
     private struct CameraPoseSample
     {
@@ -122,6 +123,27 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
         if (targetCamera != null && frameArgs.timestampNs.HasValue)
             RecordCameraPose(frameArgs.timestampNs.Value, new Pose(targetCamera.transform.position, targetCamera.transform.rotation));
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+        if (Time.unscaledTime - _lastCpuImageScanTime < detectionIntervalSeconds)
+            return;
+
+        _lastCpuImageScanTime = Time.unscaledTime;
+        if (cameraManager == null || !cameraManager.TryAcquireLatestCpuImage(out var image))
+        {
+            SetStatus(BuildCameraStartupStatus());
+            return;
+        }
+
+        try
+        {
+            ProcessCpuImage(image);
+        }
+        finally
+        {
+            image.Dispose();
+        }
+#endif
     }
 
     private void Update()
@@ -277,110 +299,94 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         while (true)
         {
             if (cameraManager == null)
-            {
                 SetStatus("A telefon kamerája nem érhető el.");
-                yield return new WaitForSecondsRealtime(detectionIntervalSeconds);
-                continue;
-            }
-
-            if (!cameraManager.TryAcquireLatestCpuImage(out var image))
-            {
+            else if (!_hasReceivedCameraFrame)
                 SetStatus(BuildCameraStartupStatus());
-                yield return new WaitForSecondsRealtime(detectionIntervalSeconds);
-                continue;
-            }
-
-            try
-            {
-                // ARCore intrinsics describe this unrotated CPU image, not the display texture.
-                var conversion = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32)
-                {
-                    transformation = XRCpuImage.Transformation.None
-                };
-                var largestImageDimension = Mathf.Max(image.width, image.height);
-                if (largestImageDimension > MaxDetectionImageDimension)
-                {
-                    var scale = MaxDetectionImageDimension / (float)largestImageDimension;
-                    conversion.outputDimensions = new Vector2Int(
-                        Mathf.RoundToInt(image.width * scale),
-                        Mathf.RoundToInt(image.height * scale));
-                }
-                var pixels = new NativeArray<byte>(image.GetConvertedDataSize(conversion), Allocator.Temp);
-                bool tagDetected;
-                bool hasExactCalibration;
-                try
-                {
-                    image.Convert(conversion, pixels);
-                    var rgbaBytes = pixels.ToArray();
-                    hasExactCalibration = TryGetCameraCalibration(conversion.outputDimensions, out var fx, out var fy, out var cx, out var cy);
-                    if (hasExactCalibration)
-                    {
-                        var poseCandidateCount = DJIAprilTagNative.TryDetectPoseCandidates(
-                            rgbaBytes,
-                            conversion.outputDimensions.x,
-                            conversion.outputDimensions.y,
-                            fx,
-                            fy,
-                            cx,
-                            cy,
-                            PrintedTagSizeMeters,
-                            _nativeDetection,
-                            _nativePoseCandidates);
-                        _hasTagPose = TrySelectWorldPose(poseCandidateCount, image.timestamp);
-                        tagDetected = _hasTagPose || Mathf.RoundToInt(_nativeDetection[0]) == targetTagId;
-                    }
-                    else
-                    {
-                        tagDetected = DJIAprilTagNative.TryDetect(rgbaBytes, conversion.outputDimensions.x, conversion.outputDimensions.y, _nativeDetection);
-                        _hasTagPose = false;
-                    }
-                }
-                finally
-                {
-                    pixels.Dispose();
-                }
-
-                if (tagDetected && _hasTagPose)
-                {
-                    if (!_markerConfirmed)
-                    {
-                        _consecutiveMatches++;
-                        SetStatus($"AprilTag {targetTagId} felismerve ({_consecutiveMatches}/{confirmationsRequired})");
-                        if (_consecutiveMatches >= confirmationsRequired)
-                            ConfirmMarker();
-                    }
-
-                    if (_markerConfirmed)
-                        ShowMarkerPreview();
-                }
-                else if (tagDetected)
-                {
-                    _consecutiveMatches = 0;
-                    SetStatus(hasExactCalibration
-                        ? "AprilTag felismerve, de a validált PnP pózt elutasította. Tartsa a teljes markert jól megvilágítva a képben."
-                        : "AprilTag felismerve. Várakozás az ARCore pontos kamera-kalibrációjára.");
-                }
-                else
-                {
-                    if (_markerConfirmed)
-                    {
-                        SetStatus("Tartsa az AprilTag-et a telefon kameraképében.");
-                    }
-                    else
-                    {
-                        _consecutiveMatches = 0;
-                        SetStatus($"Irányítsa a telefon kameráját az AprilTag {targetTagId} markerre.");
-                    }
-                }
-            }
-            finally
-            {
-                image.Dispose();
-            }
-
-            yield return new WaitForSecondsRealtime(detectionIntervalSeconds);
+            yield return new WaitForSecondsRealtime(0.2f);
         }
 #endif
+    }
+
+    private void ProcessCpuImage(XRCpuImage image)
+    {
+        // ARCore intrinsics describe this unrotated CPU image, not the display texture.
+        var conversion = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32)
+        {
+            transformation = XRCpuImage.Transformation.None
+        };
+        var largestImageDimension = Mathf.Max(image.width, image.height);
+        if (largestImageDimension > MaxDetectionImageDimension)
+        {
+            var scale = MaxDetectionImageDimension / (float)largestImageDimension;
+            conversion.outputDimensions = new Vector2Int(
+                Mathf.RoundToInt(image.width * scale),
+                Mathf.RoundToInt(image.height * scale));
+        }
+
+        var pixels = new NativeArray<byte>(image.GetConvertedDataSize(conversion), Allocator.Temp);
+        bool tagDetected;
+        bool hasExactCalibration;
+        try
+        {
+            image.Convert(conversion, pixels);
+            var rgbaBytes = pixels.ToArray();
+            hasExactCalibration = TryGetCameraCalibration(conversion.outputDimensions, out var fx, out var fy, out var cx, out var cy);
+            if (hasExactCalibration)
+            {
+                var poseCandidateCount = DJIAprilTagNative.TryDetectPoseCandidates(
+                    rgbaBytes,
+                    conversion.outputDimensions.x,
+                    conversion.outputDimensions.y,
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    PrintedTagSizeMeters,
+                    _nativeDetection,
+                    _nativePoseCandidates);
+                _hasTagPose = TrySelectWorldPose(poseCandidateCount, image.timestamp);
+                tagDetected = _hasTagPose || Mathf.RoundToInt(_nativeDetection[0]) == targetTagId;
+            }
+            else
+            {
+                tagDetected = DJIAprilTagNative.TryDetect(rgbaBytes, conversion.outputDimensions.x, conversion.outputDimensions.y, _nativeDetection);
+                _hasTagPose = false;
+            }
+        }
+        finally
+        {
+            pixels.Dispose();
+        }
+
+        if (tagDetected && _hasTagPose)
+        {
+            if (!_markerConfirmed)
+            {
+                _consecutiveMatches++;
+                SetStatus($"AprilTag {targetTagId} felismerve ({_consecutiveMatches}/{confirmationsRequired})");
+                if (_consecutiveMatches >= confirmationsRequired)
+                    ConfirmMarker();
+            }
+
+            if (_markerConfirmed)
+                ShowMarkerPreview();
+        }
+        else if (tagDetected)
+        {
+            _consecutiveMatches = 0;
+            SetStatus(hasExactCalibration
+                ? "AprilTag felismerve, de a validált PnP pózt elutasította. Tartsa a teljes markert jól megvilágítva a képben."
+                : "AprilTag felismerve. Várakozás az ARCore pontos kamera-kalibrációjára.");
+        }
+        else if (_markerConfirmed)
+        {
+            SetStatus("Tartsa az AprilTag-et a telefon kameraképében.");
+        }
+        else
+        {
+            _consecutiveMatches = 0;
+            SetStatus($"Irányítsa a telefon kameráját az AprilTag {targetTagId} markerre.");
+        }
     }
 
     private bool TryGetCameraCalibration(Vector2Int imageSize, out float fx, out float fy, out float cx, out float cy)
