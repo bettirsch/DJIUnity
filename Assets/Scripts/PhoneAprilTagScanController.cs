@@ -239,19 +239,16 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                 {
                     image.Convert(conversion, pixels);
                     var rgbaBytes = pixels.ToArray();
-                    if (cameraManager.TryGetIntrinsics(out var intrinsics))
+                    if (TryGetCameraCalibration(conversion.outputDimensions, out var fx, out var fy, out var cx, out var cy))
                     {
-                        var imageToIntrinsicsScale = new Vector2(
-                            conversion.outputDimensions.x / (float)intrinsics.resolution.x,
-                            conversion.outputDimensions.y / (float)intrinsics.resolution.y);
                         detected = DJIAprilTagNative.TryDetectPose(
                             rgbaBytes,
                             conversion.outputDimensions.x,
                             conversion.outputDimensions.y,
-                            intrinsics.focalLength.x * imageToIntrinsicsScale.x,
-                            intrinsics.focalLength.y * imageToIntrinsicsScale.y,
-                            intrinsics.principalPoint.x * imageToIntrinsicsScale.x,
-                            intrinsics.principalPoint.y * imageToIntrinsicsScale.y,
+                            fx,
+                            fy,
+                            cx,
+                            cy,
                             PrintedTagSizeMeters,
                             _nativeDetection,
                             _nativePose);
@@ -304,6 +301,44 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             yield return new WaitForSecondsRealtime(detectionIntervalSeconds);
         }
 #endif
+    }
+
+    private bool TryGetCameraCalibration(Vector2Int imageSize, out float fx, out float fy, out float cx, out float cy)
+    {
+        if (cameraManager.TryGetIntrinsics(out var intrinsics) &&
+            intrinsics.resolution.x > 0 && intrinsics.resolution.y > 0)
+        {
+            var imageToIntrinsicsScale = new Vector2(
+                imageSize.x / (float)intrinsics.resolution.x,
+                imageSize.y / (float)intrinsics.resolution.y);
+            fx = intrinsics.focalLength.x * imageToIntrinsicsScale.x;
+            fy = intrinsics.focalLength.y * imageToIntrinsicsScale.y;
+            cx = intrinsics.principalPoint.x * imageToIntrinsicsScale.x;
+            cy = intrinsics.principalPoint.y * imageToIntrinsicsScale.y;
+            return fx > 0f && fy > 0f;
+        }
+
+        var arCamera = cameraManager.GetComponent<Camera>() ?? Camera.main;
+        if (arCamera != null)
+        {
+            var projection = arCamera.projectionMatrix;
+            fx = Mathf.Abs(projection.m00) * imageSize.x * 0.5f;
+            fy = Mathf.Abs(projection.m11) * imageSize.y * 0.5f;
+            if (fx > 0.001f && fy > 0.001f)
+            {
+                // CPU images can have a different orientation than the display, so use
+                // the image center rather than display-space principal point offsets.
+                cx = imageSize.x * 0.5f;
+                cy = imageSize.y * 0.5f;
+                return true;
+            }
+        }
+
+        fx = 0f;
+        fy = 0f;
+        cx = 0f;
+        cy = 0f;
+        return false;
     }
 
     private void ConfirmMarker()
