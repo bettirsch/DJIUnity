@@ -70,6 +70,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private Vector3 _pendingTagWorldPosition;
     private Quaternion _pendingTagWorldRotation;
     private int _pendingPoseFrames;
+    private bool _hasReceivedCameraFrame;
+    private float _cameraStartupTime;
 
     private struct CameraPoseSample
     {
@@ -80,7 +82,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private void Awake()
     {
         DisableLegacyPlacementPrototype();
-        cameraManager ??= FindAnyObjectByType<ARCameraManager>();
+        EnsurePhoneArCameraIsEnabled();
         CreateUi();
         AprilTagScanSession.Clear();
     }
@@ -88,7 +90,9 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private void OnEnable()
     {
         DJIAprilTagNative.SetTargetTagId(targetTagId);
-        cameraManager ??= FindAnyObjectByType<ARCameraManager>();
+        EnsurePhoneArCameraIsEnabled();
+        _hasReceivedCameraFrame = false;
+        _cameraStartupTime = Time.unscaledTime;
         if (cameraManager != null)
             cameraManager.frameReceived += OnCameraFrameReceived;
         StartCoroutine(ScanLoop());
@@ -106,6 +110,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
     private void OnCameraFrameReceived(ARCameraFrameEventArgs frameArgs)
     {
+        _hasReceivedCameraFrame = true;
         if (cameraManager != null && cameraManager.TryGetIntrinsics(out var intrinsics) &&
             intrinsics.resolution.x > 0 && intrinsics.resolution.y > 0 &&
             intrinsics.focalLength.x > 0f && intrinsics.focalLength.y > 0f)
@@ -280,7 +285,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
             if (!cameraManager.TryAcquireLatestCpuImage(out var image))
             {
-                SetStatus("Telefonkamera indítása...");
+                SetStatus(BuildCameraStartupStatus());
                 yield return new WaitForSecondsRealtime(detectionIntervalSeconds);
                 continue;
             }
@@ -402,6 +407,28 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         cx = _cachedIntrinsics.principalPoint.x * imageToIntrinsicsScale.x;
         cy = _cachedIntrinsics.principalPoint.y * imageToIntrinsicsScale.y;
         return fx > 0f && fy > 0f;
+    }
+
+    private string BuildCameraStartupStatus()
+    {
+        if (ARSession.state == ARSessionState.None || ARSession.state == ARSessionState.CheckingAvailability)
+            return "ARCore elérhetőség ellenőrzése...";
+
+        if (ARSession.state == ARSessionState.NeedsInstall || ARSession.state == ARSessionState.Installing)
+            return "Az ARCore telepítése vagy frissítése folyamatban van...";
+
+        if (ARSession.state == ARSessionState.Unsupported)
+            return "Az ARCore nem támogatott ezen a készüléken.";
+
+        if (!_hasReceivedCameraFrame)
+        {
+            var elapsedSeconds = Time.unscaledTime - _cameraStartupTime;
+            return elapsedSeconds < 3f
+                ? "Telefonkamera indítása..."
+                : "Az ARCore még nem adott kameraképet. Ellenőrizze a kameraengedélyt, majd indítsa újra az appot.";
+        }
+
+        return "Az ARCore ad kameraframe-et, de a CPU-kép még nem érhető el. Tartsa nyitva az appot pár másodpercig.";
     }
 
     private void ConfirmMarker()
@@ -695,6 +722,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         if (placementController != null)
             placementController.enabled = false;
 
+        // This older DJI-only prototype intentionally disables the AR camera.
+        // It must never run alongside the phone-camera AprilTag scan flow.
+        foreach (var markerController in FindObjectsByType<DJIAprilTagMarkerMvpController>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+            markerController.enabled = false;
+
         foreach (var planeManager in FindObjectsByType<ARPlaneManager>(FindObjectsInactive.Include, FindObjectsSortMode.None))
             planeManager.enabled = false;
 
@@ -712,6 +744,30 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         var legacyCanvas = GameObject.Find("AR Placement Canvas");
         if (legacyCanvas != null)
             legacyCanvas.SetActive(false);
+
+        var legacyMarkerCanvas = GameObject.Find("DJI AprilTag MVP Canvas");
+        if (legacyMarkerCanvas != null)
+            legacyMarkerCanvas.SetActive(false);
+    }
+
+    private void EnsurePhoneArCameraIsEnabled()
+    {
+        var arSession = FindAnyObjectByType<ARSession>();
+        if (arSession != null)
+            arSession.enabled = true;
+
+        cameraManager ??= FindAnyObjectByType<ARCameraManager>();
+        if (cameraManager == null)
+            return;
+
+        cameraManager.enabled = true;
+        var targetCamera = cameraManager.GetComponent<Camera>() ?? Camera.main;
+        if (targetCamera == null)
+            return;
+
+        var cameraBackground = targetCamera.GetComponent<ARCameraBackground>();
+        if (cameraBackground != null)
+            cameraBackground.enabled = true;
     }
 
     private void CreateUi()
