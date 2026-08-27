@@ -17,10 +17,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float ReferenceImageWidthMeters = 0.2f;
     private const float PrintedTagSizeMeters = 0.2f;
     private const float PreviewCubeSizeMeters = 0.14f;
-    private const float PoseCorrectionLerp = 0.45f;
+    private const int MaxDetectionImageDimension = 960;
+    private const float MarkerLostTimeoutSeconds = 0.2f;
 
     [SerializeField] private ARCameraManager cameraManager;
-    [SerializeField] [Min(0.1f)] private float detectionIntervalSeconds = 0.1f;
+    [SerializeField] [Min(0.01f)] private float detectionIntervalSeconds = 0.03f;
     [SerializeField] [Min(1)] private int confirmationsRequired = 3;
     [SerializeField] private int targetTagId;
 
@@ -29,21 +30,17 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private Text _statusLabel;
     private Button _connectDroneButton;
     private GameObject _previewCube;
-    private ARAnchorManager _anchorManager;
-    private ARAnchor _previewAnchor;
     private ARTrackedImageManager _trackedImageManager;
     private Texture2D _runtimeReferenceTexture;
     private int _consecutiveMatches;
     private bool _markerConfirmed;
     private bool _hasTagPose;
+    private float _lastPoseUpdateTime = float.NegativeInfinity;
 
     private void Awake()
     {
         DisableLegacyPlacementPrototype();
         cameraManager ??= FindAnyObjectByType<ARCameraManager>();
-        _anchorManager ??= FindAnyObjectByType<ARAnchorManager>();
-        if (_anchorManager != null)
-            _anchorManager.enabled = true;
         CreateUi();
         AprilTagScanSession.Clear();
     }
@@ -60,6 +57,14 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         if (_trackedImageManager != null)
             _trackedImageManager.trackablesChanged.RemoveListener(OnTrackedImagesChanged);
         DJIAprilTagNative.ReleaseDetector();
+    }
+
+    private void Update()
+    {
+        // A stale pose would make the cube appear attached even after the marker leaves the frame.
+        if (_previewCube != null && _previewCube.activeSelf &&
+            Time.unscaledTime - _lastPoseUpdateTime > MarkerLostTimeoutSeconds)
+            _previewCube.SetActive(false);
     }
 
     private IEnumerator InitializeImageTracking()
@@ -220,6 +225,14 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             try
             {
                 var conversion = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32);
+                var largestImageDimension = Mathf.Max(image.width, image.height);
+                if (largestImageDimension > MaxDetectionImageDimension)
+                {
+                    var scale = MaxDetectionImageDimension / (float)largestImageDimension;
+                    conversion.outputDimensions = new Vector2Int(
+                        Mathf.RoundToInt(image.width * scale),
+                        Mathf.RoundToInt(image.height * scale));
+                }
                 var pixels = new NativeArray<byte>(image.GetConvertedDataSize(conversion), Allocator.Temp);
                 bool detected;
                 try
@@ -330,7 +343,9 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
         var tagPosition = new Vector3(_nativePose[0], _nativePose[1], -_nativePose[2]);
         var tagRight = new Vector3(_nativePose[3], _nativePose[6], -_nativePose[9]).normalized;
-        var tagUp = new Vector3(_nativePose[4], _nativePose[7], -_nativePose[10]).normalized;
+        var tagUp = Vector3.ProjectOnPlane(
+            new Vector3(_nativePose[4], _nativePose[7], -_nativePose[10]),
+            tagRight).normalized;
         var tagNormal = Vector3.Cross(tagRight, tagUp).normalized;
         if (tagRight.sqrMagnitude < 0.9f || tagUp.sqrMagnitude < 0.9f || tagNormal.sqrMagnitude < 0.9f)
             return;
@@ -340,38 +355,13 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         var cubeWorldPosition = targetCamera.transform.TransformPoint(cubeLocalPosition);
         var cubeWorldRotation = targetCamera.transform.rotation * cubeLocalRotation;
 
-        if (_previewAnchor != null)
-        {
-            var correctedLocalPosition = _previewAnchor.transform.InverseTransformPoint(cubeWorldPosition);
-            var correctedLocalRotation = Quaternion.Inverse(_previewAnchor.transform.rotation) * cubeWorldRotation;
-            _previewCube.transform.localPosition = Vector3.Lerp(
-                _previewCube.transform.localPosition,
-                correctedLocalPosition,
-                PoseCorrectionLerp);
-            _previewCube.transform.localRotation = Quaternion.Slerp(
-                _previewCube.transform.localRotation,
-                correctedLocalRotation,
-                PoseCorrectionLerp);
-            return;
-        }
-
-        var anchorObject = new GameObject("Phone AprilTag Anchor");
-        anchorObject.transform.SetPositionAndRotation(cubeWorldPosition, cubeWorldRotation);
-        _previewAnchor = anchorObject.AddComponent<ARAnchor>();
-
-        if (!_previewAnchor.isActiveAndEnabled)
-        {
-            Destroy(anchorObject);
-            _previewAnchor = null;
-            SetStatus("Az ARCore ankor nem indult el. Irányítsa újra a telefont az AprilTag-re.");
-            return;
-        }
-
-        _previewCube.transform.SetParent(_previewAnchor.transform, false);
-        _previewCube.transform.localPosition = Vector3.zero;
-        _previewCube.transform.localRotation = Quaternion.identity;
+        // The AprilTag pose is recalculated from the current camera frame, so it must
+        // drive the preview directly rather than being converted into a one-time AR anchor.
+        _previewCube.transform.SetParent(null, true);
+        _previewCube.transform.SetPositionAndRotation(cubeWorldPosition, cubeWorldRotation);
         _previewCube.transform.localScale = Vector3.one * PreviewCubeSizeMeters;
         _previewCube.SetActive(true);
+        _lastPoseUpdateTime = Time.unscaledTime;
     }
 
     private void LoadDroneView()
