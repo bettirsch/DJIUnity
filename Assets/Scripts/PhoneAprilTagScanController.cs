@@ -448,8 +448,9 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             var tagWorldPosition = targetCamera.transform.TransformPoint(tagPosition);
             var tagWorldRotation = targetCamera.transform.rotation * Quaternion.LookRotation(tagNormal, tagUp);
             var cubeWorldPosition = targetCamera.transform.TransformPoint(tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f));
-            // The marker normal is the cube's up axis: its bottom face stays on the tag.
-            var cubeWorldRotation = targetCamera.transform.rotation * Quaternion.LookRotation(tagRight, tagNormal);
+            // Convert from the marker basis (forward = outward normal) to a Unity cube
+            // basis (up = outward normal), so the cube's bottom face lies on the tag.
+            var cubeWorldRotation = tagWorldRotation * Quaternion.AngleAxis(90f, Vector3.right);
 
             // A fixed marker should retain the same ARCore world pose between frames.
             var score = reprojectionError * 0.02f;
