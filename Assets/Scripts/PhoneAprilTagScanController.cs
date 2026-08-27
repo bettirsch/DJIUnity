@@ -20,6 +20,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private static readonly Color PreviewCubeColor = new(1f, 0.78f, 0.05f, 1f);
     private const int MaxDetectionImageDimension = 960;
     private const float MarkerLostTimeoutSeconds = 0.2f;
+    private const int PoseCandidateStride = 13;
+    private const int MaximumPoseCandidates = 2;
 
     [SerializeField] private ARCameraManager cameraManager;
     [SerializeField] [Min(0.01f)] private float detectionIntervalSeconds = 0.03f;
@@ -27,7 +29,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     [SerializeField] private int targetTagId;
 
     private readonly float[] _nativeDetection = new float[12];
-    private readonly float[] _nativePose = new float[12];
+    private readonly float[] _nativePoseCandidates = new float[PoseCandidateStride * MaximumPoseCandidates];
     private Text _statusLabel;
     private Button _connectDroneButton;
     private GameObject _previewCube;
@@ -39,6 +41,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private float _lastPoseUpdateTime = float.NegativeInfinity;
     private XRCameraIntrinsics _cachedIntrinsics;
     private bool _hasCachedIntrinsics;
+    private Vector3 _trackedTagWorldPosition;
+    private Quaternion _trackedTagWorldRotation;
+    private Vector3 _selectedCubeWorldPosition;
+    private Quaternion _selectedCubeWorldRotation;
+    private bool _hasTrackedTagWorldPose;
 
     private void Awake()
     {
@@ -83,7 +90,10 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         // A stale pose would make the cube appear attached even after the marker leaves the frame.
         if (_previewCube != null && _previewCube.activeSelf &&
             Time.unscaledTime - _lastPoseUpdateTime > MarkerLostTimeoutSeconds)
+        {
             _previewCube.SetActive(false);
+            _hasTrackedTagWorldPose = false;
+        }
     }
 
     private IEnumerator InitializeImageTracking()
@@ -266,7 +276,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                     hasExactCalibration = TryGetCameraCalibration(conversion.outputDimensions, out var fx, out var fy, out var cx, out var cy);
                     if (hasExactCalibration)
                     {
-                        _hasTagPose = DJIAprilTagNative.TryDetectPose(
+                        var poseCandidateCount = DJIAprilTagNative.TryDetectPoseCandidates(
                             rgbaBytes,
                             conversion.outputDimensions.x,
                             conversion.outputDimensions.y,
@@ -276,7 +286,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                             cy,
                             PrintedTagSizeMeters,
                             _nativeDetection,
-                            _nativePose);
+                            _nativePoseCandidates);
+                        _hasTagPose = TrySelectWorldPose(poseCandidateCount);
                         tagDetected = _hasTagPose || Mathf.RoundToInt(_nativeDetection[0]) == targetTagId;
                     }
                     else
@@ -370,41 +381,91 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
     private void ShowMarkerPreview()
     {
-        var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
-        if (targetCamera == null)
-            return;
-
         EnsurePreviewCube();
 
         if (!_hasTagPose)
             return;
 
-        // OpenCV returns right/down/forward camera coordinates. Unity camera-local
-        // coordinates are right/up/forward, so only the camera Y axis is inverted.
-        var tagPosition = new Vector3(_nativePose[0], -_nativePose[1], _nativePose[2]);
-        var tagRight = new Vector3(_nativePose[3], -_nativePose[6], _nativePose[9]).normalized;
-        var tagUp = Vector3.ProjectOnPlane(
-            new Vector3(_nativePose[4], -_nativePose[7], _nativePose[10]),
-            tagRight).normalized;
-        var tagNormal = Vector3.Cross(tagRight, tagUp).normalized;
-        if (!IsFinite(tagPosition) || !IsFinite(tagRight) || !IsFinite(tagUp) || !IsFinite(tagNormal) ||
-            tagRight.sqrMagnitude < 0.9f || tagUp.sqrMagnitude < 0.9f || tagNormal.sqrMagnitude < 0.9f)
-        {
-            return;
-        }
-
-        var cubeLocalPosition = tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f);
-        var cubeLocalRotation = Quaternion.LookRotation(tagNormal, tagUp);
-        var cubeWorldPosition = targetCamera.transform.TransformPoint(cubeLocalPosition);
-        var cubeWorldRotation = targetCamera.transform.rotation * cubeLocalRotation;
-
-        // The AprilTag pose is recalculated from the current camera frame, so it must
-        // drive the preview directly rather than being converted into a one-time AR anchor.
         _previewCube.transform.SetParent(null, true);
-        _previewCube.transform.SetPositionAndRotation(cubeWorldPosition, cubeWorldRotation);
+        _previewCube.transform.SetPositionAndRotation(_selectedCubeWorldPosition, _selectedCubeWorldRotation);
         _previewCube.transform.localScale = Vector3.one * PreviewCubeSizeMeters;
         _previewCube.SetActive(true);
         _lastPoseUpdateTime = Time.unscaledTime;
+    }
+
+    private bool TrySelectWorldPose(int poseCandidateCount)
+    {
+        var targetCamera = cameraManager != null ? cameraManager.GetComponent<Camera>() : Camera.main;
+        if (targetCamera == null)
+            return false;
+
+        var bestScore = float.PositiveInfinity;
+        var hasBestCandidate = false;
+        var bestTagPosition = Vector3.zero;
+        var bestTagRotation = Quaternion.identity;
+        var bestCubePosition = Vector3.zero;
+        var bestCubeRotation = Quaternion.identity;
+        var candidateLimit = Mathf.Min(poseCandidateCount, MaximumPoseCandidates);
+
+        for (var candidateIndex = 0; candidateIndex < candidateLimit; ++candidateIndex)
+        {
+            var offset = candidateIndex * PoseCandidateStride;
+            var reprojectionError = _nativePoseCandidates[offset + 12];
+            if (float.IsNaN(reprojectionError) || float.IsInfinity(reprojectionError))
+                continue;
+
+            // OpenCV uses right/down/forward camera coordinates; Unity uses right/up/forward.
+            var tagPosition = new Vector3(
+                _nativePoseCandidates[offset],
+                -_nativePoseCandidates[offset + 1],
+                _nativePoseCandidates[offset + 2]);
+            var tagRight = new Vector3(
+                _nativePoseCandidates[offset + 3],
+                -_nativePoseCandidates[offset + 6],
+                _nativePoseCandidates[offset + 9]).normalized;
+            var tagUp = Vector3.ProjectOnPlane(new Vector3(
+                _nativePoseCandidates[offset + 4],
+                -_nativePoseCandidates[offset + 7],
+                _nativePoseCandidates[offset + 10]), tagRight).normalized;
+            var tagNormal = Vector3.Cross(tagRight, tagUp).normalized;
+            if (!IsFinite(tagPosition) || !IsFinite(tagRight) || !IsFinite(tagUp) || !IsFinite(tagNormal) ||
+                tagRight.sqrMagnitude < 0.9f || tagUp.sqrMagnitude < 0.9f || tagNormal.sqrMagnitude < 0.9f)
+            {
+                continue;
+            }
+
+            var tagWorldPosition = targetCamera.transform.TransformPoint(tagPosition);
+            var tagWorldRotation = targetCamera.transform.rotation * Quaternion.LookRotation(tagNormal, tagUp);
+            var cubeWorldPosition = targetCamera.transform.TransformPoint(tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f));
+
+            // A fixed marker should retain the same ARCore world pose between frames.
+            var score = reprojectionError * 0.02f;
+            if (_hasTrackedTagWorldPose)
+            {
+                score += Vector3.Distance(tagWorldPosition, _trackedTagWorldPosition) / 0.04f;
+                score += Quaternion.Angle(tagWorldRotation, _trackedTagWorldRotation) / 15f;
+            }
+
+            if (score >= bestScore)
+                continue;
+
+            bestScore = score;
+            hasBestCandidate = true;
+            bestTagPosition = tagWorldPosition;
+            bestTagRotation = tagWorldRotation;
+            bestCubePosition = cubeWorldPosition;
+            bestCubeRotation = tagWorldRotation;
+        }
+
+        if (!hasBestCandidate)
+            return false;
+
+        _trackedTagWorldPosition = bestTagPosition;
+        _trackedTagWorldRotation = bestTagRotation;
+        _selectedCubeWorldPosition = bestCubePosition;
+        _selectedCubeWorldRotation = bestCubeRotation;
+        _hasTrackedTagWorldPose = true;
+        return true;
     }
 
     private void EnsurePreviewCube()
