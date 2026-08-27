@@ -98,8 +98,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
     private void Update()
     {
-        // Before confirmation, a stale pose must not look like a real marker lock.
-        if (!_markerConfirmed && _previewCube != null && _previewCube.activeSelf &&
+        // A stale pose would make the cube appear attached even after the marker leaves the frame.
+        if (_previewCube != null && _previewCube.activeSelf &&
             Time.unscaledTime - _lastPoseUpdateTime > MarkerLostTimeoutSeconds)
         {
             _previewCube.SetActive(false);
@@ -248,22 +248,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 #else
         while (true)
         {
-            if (_markerConfirmed && _hasTrackedTagWorldPose)
-            {
-                if (ARSession.state == ARSessionState.SessionTracking)
-                {
-                    _hasTagPose = true;
-                    ShowMarkerPreview();
-                }
-                else
-                {
-                    SetStatus("Az ARCore világkövetés visszaállítására várok.");
-                }
-
-                yield return new WaitForSecondsRealtime(detectionIntervalSeconds);
-                continue;
-            }
-
             if (cameraManager == null)
             {
                 SetStatus("A telefon kamerája nem érhető el.");
