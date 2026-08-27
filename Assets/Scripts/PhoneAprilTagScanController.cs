@@ -434,8 +434,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                 continue;
             }
 
-            // The visible face of a printed marker points towards the camera. This makes
-            // the cube's rear face lie on the tag and its top remain the visible face overhead.
+            // The visible face of a printed marker points towards the camera. Use it as
+            // the cube's up axis, so the cube's base lies on the tag instead of a side.
             if (Vector3.Dot(tagNormal, tagPosition) > 0f)
             {
                 tagNormal = -tagNormal;
@@ -450,7 +450,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             bestScore = score;
             hasBestCandidate = true;
             bestCubePosition = tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f);
-            bestCubeRotation = Quaternion.LookRotation(tagNormal, tagUp);
+            bestCubeRotation = Quaternion.LookRotation(tagRight, tagNormal);
         }
 
         if (!hasBestCandidate)
