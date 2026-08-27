@@ -448,6 +448,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             var tagWorldPosition = targetCamera.transform.TransformPoint(tagPosition);
             var tagWorldRotation = targetCamera.transform.rotation * Quaternion.LookRotation(tagNormal, tagUp);
             var cubeWorldPosition = targetCamera.transform.TransformPoint(tagPosition + tagNormal * (PreviewCubeSizeMeters * 0.5f));
+            // The marker normal is the cube's up axis: its bottom face stays on the tag.
+            var cubeWorldRotation = targetCamera.transform.rotation * Quaternion.LookRotation(tagRight, tagNormal);
 
             // A fixed marker should retain the same ARCore world pose between frames.
             var score = reprojectionError * 0.02f;
@@ -465,7 +467,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             bestTagPosition = tagWorldPosition;
             bestTagRotation = tagWorldRotation;
             bestCubePosition = cubeWorldPosition;
-            bestCubeRotation = tagWorldRotation;
+            bestCubeRotation = cubeWorldRotation;
         }
 
         if (!hasBestCandidate)
