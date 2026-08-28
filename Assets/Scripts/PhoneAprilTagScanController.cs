@@ -522,7 +522,9 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
         if (!hasBestCandidate)
         {
-            Debug.Log("[DJIAprilTag] Unity rejected every raw OpenCV PnP candidate before world-pose selection.");
+            Debug.Log(candidateLimit == 0
+                ? "[DJIAprilTag] Native PnP returned no valid candidates for this camera frame."
+                : "[DJIAprilTag] Unity rejected every raw OpenCV PnP candidate before world-pose selection.");
             return false;
         }
 
