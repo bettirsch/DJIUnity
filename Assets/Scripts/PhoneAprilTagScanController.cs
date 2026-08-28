@@ -58,6 +58,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private readonly float[] _nativePoseCandidates = new float[PoseCandidateStride * MaximumPoseCandidates];
     private Text _statusLabel;
     private Button _connectDroneButton;
+    private Text _candidateDiagnosticLabel;
     private GameObject _previewCube;
     private ARTrackedImageManager _trackedImageManager;
     private Texture2D _runtimeReferenceTexture;
@@ -1061,7 +1062,38 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         buttonText.text = "Csatlakoztassa a drónt";
         _connectDroneButton.gameObject.SetActive(false);
 
+        var diagnosticPanel = CreatePanel(canvas.transform, "PnpCandidateDiagnosticButton", new Vector2(0f, 1f), new Vector2(175f, -46f), new Vector2(320f, 58f), new Color(0.16f, 0.2f, 0.3f, 0.92f));
+        var diagnosticButton = diagnosticPanel.gameObject.AddComponent<Button>();
+        diagnosticButton.onClick.AddListener(CyclePoseCandidateDiagnosticMode);
+        _candidateDiagnosticLabel = CreateText(diagnosticPanel, "Label", 20, TextAnchor.MiddleCenter);
+        UpdateCandidateDiagnosticButtonLabel();
+
         SetStatus($"Irányítsa a telefon kameráját az AprilTag {targetTagId} markerre.");
+    }
+
+    private void CyclePoseCandidateDiagnosticMode()
+    {
+        poseCandidateDiagnosticMode = poseCandidateDiagnosticMode switch
+        {
+            PoseCandidateDiagnosticMode.Auto => PoseCandidateDiagnosticMode.ForceCandidate0,
+            PoseCandidateDiagnosticMode.ForceCandidate0 => PoseCandidateDiagnosticMode.ForceCandidate1,
+            _ => PoseCandidateDiagnosticMode.Auto
+        };
+        UpdateCandidateDiagnosticButtonLabel();
+    }
+
+    private void UpdateCandidateDiagnosticButtonLabel()
+    {
+        if (_candidateDiagnosticLabel == null)
+            return;
+
+        var label = poseCandidateDiagnosticMode switch
+        {
+            PoseCandidateDiagnosticMode.ForceCandidate0 => "PnP: Candidate 0",
+            PoseCandidateDiagnosticMode.ForceCandidate1 => "PnP: Candidate 1",
+            _ => "PnP: Auto"
+        };
+        _candidateDiagnosticLabel.text = label;
     }
 
     private static RectTransform CreatePanel(Transform parent, string name, Vector2 anchor, Vector2 position, Vector2 size, Color color)
