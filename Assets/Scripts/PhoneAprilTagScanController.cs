@@ -46,6 +46,10 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float MaximumContinuousRotationDeltaDegrees = 35f;
     private const float PendingPosePositionToleranceMeters = 0.025f;
     private const float PendingPoseRotationToleranceDegrees = 12f;
+    private const float MaximumAcceptedReprojectionRmsPixels = 12f;
+    private const float PositionFilterTimeConstantSeconds = 0.12f;
+    private const float RotationFilterTimeConstantSeconds = 0.16f;
+    private const float MinimumFilterConfidence = 0.18f;
     private const float DiagnosticLogIntervalSeconds = 0.5f;
 
     [SerializeField] private ARCameraManager cameraManager;
@@ -76,6 +80,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private Vector3 _pendingTagWorldPosition;
     private Quaternion _pendingTagWorldRotation;
     private int _pendingPoseFrames;
+    private float _lastPoseFilterTime = float.NegativeInfinity;
     private bool _hasReceivedCameraFrame;
     private float _cameraStartupTime;
     private float _lastCpuImageScanTime = float.NegativeInfinity;
@@ -194,6 +199,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         {
             _previewCube.SetActive(false);
             _hasTrackedTagWorldPose = false;
+            _lastPoseFilterTime = float.NegativeInfinity;
             ResetNormalDiagnosticBaselines();
             _hasDiagnosticCameraPose = false;
         }
@@ -545,6 +551,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             _lastDiagnosticCandidateMode = poseCandidateDiagnosticMode;
             _hasTrackedTagWorldPose = false;
             _pendingPoseFrames = 0;
+            _lastPoseFilterTime = float.NegativeInfinity;
             ResetNormalDiagnosticBaselines();
             Debug.Log($"[DJIAprilTag] Candidate diagnostic mode changed to {poseCandidateDiagnosticMode}; cleared pose continuity and normal baselines.");
         }
@@ -556,9 +563,9 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             _lastCandidateDiagnosticLogTime = Time.unscaledTime;
         Array.Clear(_candidateScoreAvailable, 0, _candidateScoreAvailable.Length);
         var bestScore = float.PositiveInfinity;
+        var bestReprojectionError = float.PositiveInfinity;
         var hasBestCandidate = false;
         var bestTagPosition = Vector3.zero;
-        var bestCubePosition = Vector3.zero;
         var bestCubeRotation = Quaternion.identity;
         var bestWorldNormal = Vector3.zero;
         var bestCandidateIndex = -1;
@@ -568,14 +575,14 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         {
             var offset = candidateIndex * PoseCandidateStride;
             var reprojectionError = _nativePoseCandidates[offset + 12];
-            if (float.IsNaN(reprojectionError) || float.IsInfinity(reprojectionError))
+            if (float.IsNaN(reprojectionError) || float.IsInfinity(reprojectionError) ||
+                reprojectionError > MaximumAcceptedReprojectionRmsPixels)
                 continue;
 
-            if (!TryConvertNativePose(offset, out var tagPosition, out var cubeCameraRotation, out var outwardNormal))
+            if (!TryConvertNativePose(offset, out var tagPosition, out var cubeCameraRotation, out _))
                 continue;
 
             var tagWorldPosition = cameraPose.position + cameraPose.rotation * tagPosition;
-            var cubeWorldPosition = cameraPose.position + cameraPose.rotation * (tagPosition + outwardNormal * (PreviewCubeSizeMeters * 0.5f));
             var cubeWorldRotation = cameraPose.rotation * cubeCameraRotation;
             var worldNormal = cameraPose.rotation * (cubeCameraRotation * Vector3.up);
             var cameraSpaceNormal = GetNativeCameraSpaceNormal(offset);
@@ -616,13 +623,17 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             if (forcedCandidateIndex >= 0 && candidateIndex != forcedCandidateIndex)
                 continue;
 
-            if (score >= bestScore)
+            // IPPE candidates represent the same planar marker. Select by the
+            // measurement quality first; continuity is used only to reject a
+            // transient outlier after selection, never to keep a wrong branch.
+            if (reprojectionError > bestReprojectionError ||
+                (Mathf.Approximately(reprojectionError, bestReprojectionError) && score >= bestScore))
                 continue;
 
+            bestReprojectionError = reprojectionError;
             bestScore = score;
             hasBestCandidate = true;
             bestTagPosition = tagWorldPosition;
-            bestCubePosition = cubeWorldPosition;
             bestCubeRotation = cubeWorldRotation;
             bestWorldNormal = worldNormal;
             bestCandidateIndex = candidateIndex;
@@ -640,8 +651,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         if (logCandidateDiagnostics)
             LogCandidateSelectionDecision(bestCandidateIndex, forcedCandidateIndex);
 
-        var forceCandidate = forcedCandidateIndex >= 0;
-        if (!forceCandidate && _hasTrackedTagWorldPose && !IsContinuousPose(bestTagPosition, bestCubeRotation))
+        if (_hasTrackedTagWorldPose && !IsContinuousPose(bestTagPosition, bestCubeRotation))
         {
             TrackPendingPose(bestTagPosition, bestCubeRotation);
             if (_pendingPoseFrames < PoseSwitchConfirmationFrames)
@@ -652,16 +662,43 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         }
 
         _pendingPoseFrames = 0;
-        _trackedTagWorldPosition = bestTagPosition;
-        _trackedTagWorldRotation = bestCubeRotation;
-        _selectedCubeWorldPosition = bestCubePosition;
-        _selectedCubeWorldRotation = bestCubeRotation;
+        ApplyFilteredWorldPose(bestTagPosition, bestCubeRotation, reprojectionError: _candidateRmsScores[bestCandidateIndex]);
         _hasTrackedTagWorldPose = true;
         Debug.Log(
             $"[DJIAprilTag] Unity selected raw OpenCV PnP candidate={bestCandidateIndex} " +
             $"mode={poseCandidateDiagnosticMode} score={bestScore:F4} " +
-            $"reason={(forceCandidate ? "forced diagnostic selection" : "lowest reprojection + position-continuity + rotation-continuity score")}.");
+            $"reason={(forcedCandidateIndex >= 0 ? "forced diagnostic selection with continuity and temporal filtering" : "lowest reprojection RMS, followed by outlier gating and temporal filtering")}.");
         return true;
+    }
+
+    private void ApplyFilteredWorldPose(Vector3 rawTagWorldPosition, Quaternion rawCubeWorldRotation, float reprojectionError)
+    {
+        var now = Time.unscaledTime;
+        if (!_hasTrackedTagWorldPose || float.IsNegativeInfinity(_lastPoseFilterTime))
+        {
+            _trackedTagWorldPosition = rawTagWorldPosition;
+            _trackedTagWorldRotation = rawCubeWorldRotation;
+        }
+        else
+        {
+            var elapsedSeconds = Mathf.Clamp(now - _lastPoseFilterTime, 0.001f, 0.2f);
+            var confidence = Mathf.Lerp(
+                MinimumFilterConfidence,
+                1f,
+                Mathf.InverseLerp(MaximumAcceptedReprojectionRmsPixels, 0.5f, reprojectionError));
+            var positionAlpha = (1f - Mathf.Exp(-elapsedSeconds / PositionFilterTimeConstantSeconds)) * confidence;
+            var rotationAlpha = (1f - Mathf.Exp(-elapsedSeconds / RotationFilterTimeConstantSeconds)) * confidence;
+
+            _trackedTagWorldPosition = Vector3.Lerp(_trackedTagWorldPosition, rawTagWorldPosition, positionAlpha);
+            _trackedTagWorldRotation = Quaternion.Slerp(_trackedTagWorldRotation, rawCubeWorldRotation, rotationAlpha);
+        }
+
+        // The cube local +Y is the marker normal. Recompute its center from the
+        // filtered tag pose so the bottom face remains on the marker plane.
+        _selectedCubeWorldRotation = _trackedTagWorldRotation;
+        _selectedCubeWorldPosition = _trackedTagWorldPosition +
+            (_selectedCubeWorldRotation * Vector3.up) * (PreviewCubeSizeMeters * 0.5f);
+        _lastPoseFilterTime = now;
     }
 
     private int GetForcedCandidateIndex()
