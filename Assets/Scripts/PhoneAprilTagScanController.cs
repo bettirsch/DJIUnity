@@ -660,7 +660,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         Debug.Log(
             $"[DJIAprilTag] Unity selected raw OpenCV PnP candidate={bestCandidateIndex} " +
             $"mode={poseCandidateDiagnosticMode} score={bestScore:F4} " +
-            $"reason={(forceCandidate ? \"forced diagnostic selection\" : \"lowest reprojection + position-continuity + rotation-continuity score\")}.");
+            $"reason={(forceCandidate ? "forced diagnostic selection" : "lowest reprojection + position-continuity + rotation-continuity score")}.");
         return true;
     }
 
