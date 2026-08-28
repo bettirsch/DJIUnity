@@ -338,6 +338,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                     PrintedTagSizeMeters,
                     _nativeDetection,
                     _nativePoseCandidates);
+                if (Mathf.RoundToInt(_nativeDetection[0]) == targetTagId)
+                    LogCpuImageDiagnostics(image, conversion, fx, fy, cx, cy, poseCandidateCount);
                 _hasTagPose = TrySelectWorldPose(poseCandidateCount, frameCameraPose);
                 tagDetected = _hasTagPose || Mathf.RoundToInt(_nativeDetection[0]) == targetTagId;
             }
@@ -409,6 +411,27 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         return fx > 0f && fy > 0f;
     }
 
+    private void LogCpuImageDiagnostics(
+        XRCpuImage image,
+        XRCpuImage.ConversionParams conversion,
+        float fx,
+        float fy,
+        float cx,
+        float cy,
+        int poseCandidateCount)
+    {
+        // The native detector receives precisely this unrotated converted buffer.
+        Debug.Log(
+            $"[DJIAprilTag] CPU/PnP input source={image.width}x{image.height} " +
+            $"converted={conversion.outputDimensions.x}x{conversion.outputDimensions.y} " +
+            $"format=RGBA32 transform=None (no rotation, crop, or mirror) " +
+            $"ARCoreIntrinsics={_cachedIntrinsics.resolution.x}x{_cachedIntrinsics.resolution.y} " +
+            $"rawFxFy=({_cachedIntrinsics.focalLength.x:F3},{_cachedIntrinsics.focalLength.y:F3}) " +
+            $"rawCxCy=({_cachedIntrinsics.principalPoint.x:F3},{_cachedIntrinsics.principalPoint.y:F3}) " +
+            $"passedFxFyCxCy=({fx:F3},{fy:F3},{cx:F3},{cy:F3}) " +
+            $"IPPECandidates={poseCandidateCount}");
+    }
+
     private string BuildCameraStartupStatus()
     {
         if (ARSession.state == ARSessionState.None || ARSession.state == ARSessionState.CheckingAvailability)
@@ -461,6 +484,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         var bestTagPosition = Vector3.zero;
         var bestCubePosition = Vector3.zero;
         var bestCubeRotation = Quaternion.identity;
+        var bestCandidateIndex = -1;
         var candidateLimit = Mathf.Min(poseCandidateCount, MaximumPoseCandidates);
 
         for (var candidateIndex = 0; candidateIndex < candidateLimit; ++candidateIndex)
@@ -493,16 +517,23 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             bestTagPosition = tagWorldPosition;
             bestCubePosition = cubeWorldPosition;
             bestCubeRotation = cubeWorldRotation;
+            bestCandidateIndex = candidateIndex;
         }
 
         if (!hasBestCandidate)
+        {
+            Debug.Log("[DJIAprilTag] Unity rejected every raw OpenCV PnP candidate before world-pose selection.");
             return false;
+        }
 
         if (_hasTrackedTagWorldPose && !IsContinuousPose(bestTagPosition, bestCubeRotation))
         {
             TrackPendingPose(bestTagPosition, bestCubeRotation);
             if (_pendingPoseFrames < PoseSwitchConfirmationFrames)
+            {
+                Debug.Log($"[DJIAprilTag] Unity pose selection candidate={bestCandidateIndex} deferred by continuity gate ({_pendingPoseFrames}/{PoseSwitchConfirmationFrames}).");
                 return true;
+            }
         }
 
         _pendingPoseFrames = 0;
@@ -511,6 +542,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _selectedCubeWorldPosition = bestCubePosition;
         _selectedCubeWorldRotation = bestCubeRotation;
         _hasTrackedTagWorldPose = true;
+        Debug.Log($"[DJIAprilTag] Unity selected raw OpenCV PnP candidate={bestCandidateIndex} score={bestScore:F4}.");
         return true;
     }
 
