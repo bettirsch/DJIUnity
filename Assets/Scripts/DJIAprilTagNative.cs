@@ -10,7 +10,7 @@ internal static class DJIAprilTagNative
     private static extern void DJI_ReleaseAprilTagDetector();
 
     [DllImport("djiunity")]
-    private static extern int DJI_DetectAprilTagRgba32(byte[] rgbaBytes, int width, int height, float[] outDetection, int outDetectionLength);
+    private static extern int DJI_DetectAprilTagRgba32(byte[] rgbaBytes, int width, int height, [Out] float[] outDetection, int outDetectionLength);
 
     [DllImport("djiunity")]
     private static extern int DJI_DetectAprilTagPoseRgba32(
@@ -22,9 +22,9 @@ internal static class DJIAprilTagNative
         float cx,
         float cy,
         float tagSizeMeters,
-        float[] outDetection,
+        [Out] float[] outDetection,
         int outDetectionLength,
-        float[] outPose,
+        [Out] float[] outPose,
         int outPoseLength);
 
     [DllImport("djiunity")]
@@ -37,9 +37,9 @@ internal static class DJIAprilTagNative
         float cx,
         float cy,
         float tagSizeMeters,
-        float[] outDetection,
+        [Out] float[] outDetection,
         int outDetectionLength,
-        float[] outPoseCandidates,
+        [Out] float[] outPoseCandidates,
         int outPoseCandidatesLength);
 #endif
 
