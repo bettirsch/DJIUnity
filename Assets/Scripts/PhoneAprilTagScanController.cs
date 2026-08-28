@@ -51,6 +51,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float RotationFilterTimeConstantSeconds = 0.16f;
     private const float MinimumFilterConfidence = 0.18f;
     private const float DiagnosticLogIntervalSeconds = 0.5f;
+    private const float StationaryCameraAngularSpeedDegreesPerSecond = 2f;
 
     [SerializeField] private ARCameraManager cameraManager;
     [SerializeField] [Min(0.01f)] private float detectionIntervalSeconds = 0.03f;
@@ -60,6 +61,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
     private readonly float[] _nativeDetection = new float[12];
     private readonly float[] _nativePoseCandidates = new float[PoseCandidateStride * MaximumPoseCandidates];
+    private readonly float[] _nativeOfficialPoseCandidates = new float[PoseCandidateStride * MaximumPoseCandidates];
     private Text _statusLabel;
     private Button _connectDroneButton;
     private Text _candidateDiagnosticLabel;
@@ -87,6 +89,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private float _lastCpuImageDiagnosticLogTime = float.NegativeInfinity;
     private float _lastWorldNormalDiagnosticLogTime = float.NegativeInfinity;
     private float _lastCandidateDiagnosticLogTime = float.NegativeInfinity;
+    private float _lastRawEstimatorComparisonLogTime = float.NegativeInfinity;
     private bool _hasWorldNormalReference;
     private Vector3 _worldNormalReference;
     private readonly bool[] _hasCandidateNormalBaselines = new bool[MaximumPoseCandidates];
@@ -100,6 +103,13 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private bool _hasDiagnosticCameraPose;
     private Pose _lastDiagnosticCameraPose;
     private float _lastDiagnosticCameraPoseTime;
+    private bool _hasRawEstimatorDiagnosticCameraPose;
+    private Pose _lastRawEstimatorDiagnosticCameraPose;
+    private float _lastRawEstimatorDiagnosticCameraPoseTime;
+    private bool _hasOpenCvRawWorldNormalReference;
+    private Vector3 _openCvRawWorldNormalReference;
+    private bool _hasOfficialRawWorldNormalReference;
+    private Vector3 _officialRawWorldNormalReference;
 
     private readonly struct CameraFrameContext
     {
@@ -381,7 +391,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             hasExactCalibration = TryGetCameraCalibration(conversion.outputDimensions, out var fx, out var fy, out var cx, out var cy);
             if (hasExactCalibration)
             {
-                var poseCandidateCount = DJIAprilTagNative.TryDetectPoseCandidates(
+                var poseCandidateCount = DJIAprilTagNative.TryDetectPoseCandidatesWithOfficialDiagnostics(
                     rgbaBytes,
                     conversion.outputDimensions.x,
                     conversion.outputDimensions.y,
@@ -391,9 +401,13 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                     cy,
                     PrintedTagSizeMeters,
                     _nativeDetection,
-                    _nativePoseCandidates);
+                    _nativePoseCandidates,
+                    _nativeOfficialPoseCandidates);
                 if (Mathf.RoundToInt(_nativeDetection[0]) == targetTagId)
+                {
                     LogCpuImageDiagnostics(image, conversion, fx, fy, cx, cy, poseCandidateCount, frameContext);
+                    LogRawEstimatorComparison(frameContext);
+                }
                 _hasTagPose = TrySelectWorldPose(poseCandidateCount, frameContext, image.timestamp);
                 tagDetected = _hasTagPose || Mathf.RoundToInt(_nativeDetection[0]) == targetTagId;
             }
@@ -701,6 +715,222 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _lastPoseFilterTime = now;
     }
 
+    private void LogRawEstimatorComparison(CameraFrameContext frameContext)
+    {
+        var now = Time.unscaledTime;
+        var cameraAngularSpeed = 0f;
+        if (_hasRawEstimatorDiagnosticCameraPose)
+        {
+            var elapsedSeconds = now - _lastRawEstimatorDiagnosticCameraPoseTime;
+            if (elapsedSeconds > Mathf.Epsilon)
+            {
+                cameraAngularSpeed = Quaternion.Angle(
+                    _lastRawEstimatorDiagnosticCameraPose.rotation,
+                    frameContext.cameraPose.rotation) / elapsedSeconds;
+            }
+        }
+
+        _lastRawEstimatorDiagnosticCameraPose = frameContext.cameraPose;
+        _lastRawEstimatorDiagnosticCameraPoseTime = now;
+        _hasRawEstimatorDiagnosticCameraPose = true;
+        if (now - _lastRawEstimatorComparisonLogTime < DiagnosticLogIntervalSeconds)
+            return;
+
+        _lastRawEstimatorComparisonLogTime = now;
+        LogRawEstimatorCandidates(
+            "OpenCV/IPPE",
+            "reprojectionRmsPx",
+            _nativePoseCandidates,
+            isOfficialAprilTagPose: false,
+            frameContext,
+            cameraAngularSpeed,
+            ref _hasOpenCvRawWorldNormalReference,
+            ref _openCvRawWorldNormalReference);
+        LogRawEstimatorCandidates(
+            "OfficialAprilTag",
+            "objectSpaceError",
+            _nativeOfficialPoseCandidates,
+            isOfficialAprilTagPose: true,
+            frameContext,
+            cameraAngularSpeed,
+            ref _hasOfficialRawWorldNormalReference,
+            ref _officialRawWorldNormalReference);
+    }
+
+    private void LogRawEstimatorCandidates(
+        string estimatorName,
+        string errorName,
+        float[] poseCandidates,
+        bool isOfficialAprilTagPose,
+        CameraFrameContext frameContext,
+        float cameraAngularSpeed,
+        ref bool hasStationaryWorldNormalReference,
+        ref Vector3 stationaryWorldNormalReference)
+    {
+        var selectedCandidateIndex = GetLowestErrorCandidateIndex(poseCandidates);
+        var hasSelectedPose = TryGetRawEstimatorPose(
+            poseCandidates, selectedCandidateIndex, isOfficialAprilTagPose,
+            out _, out var selectedCubeCameraRotation, out _);
+        var selectedWorldNormal = hasSelectedPose
+            ? frameContext.cameraPose.rotation * (selectedCubeCameraRotation * Vector3.up)
+            : Vector3.zero;
+
+        // These are raw estimator diagnostics only. The production temporal
+        // filter is intentionally not read or updated in this comparison path.
+        if (hasSelectedPose && !hasStationaryWorldNormalReference &&
+            cameraAngularSpeed <= StationaryCameraAngularSpeedDegreesPerSecond)
+        {
+            stationaryWorldNormalReference = selectedWorldNormal;
+            hasStationaryWorldNormalReference = true;
+        }
+
+        for (var candidateIndex = 0; candidateIndex < MaximumPoseCandidates; ++candidateIndex)
+        {
+            if (!TryGetRawEstimatorPose(
+                    poseCandidates, candidateIndex, isOfficialAprilTagPose,
+                    out var cameraPosition, out var cubeCameraRotation, out _))
+            {
+                continue;
+            }
+
+            var offset = candidateIndex * PoseCandidateStride;
+            var error = poseCandidates[offset + 12];
+            var rawCameraNormal = GetCameraSpaceNormal(poseCandidates, offset);
+            var worldNormal = frameContext.cameraPose.rotation * (cubeCameraRotation * Vector3.up);
+            var referenceDrift = hasStationaryWorldNormalReference
+                ? $"{Vector3.Angle(stationaryWorldNormalReference, worldNormal):F2}deg"
+                : "baseline-unavailable";
+            Debug.Log(
+                $"[DJIAprilTag] Raw comparison estimator={estimatorName} candidate={candidateIndex} " +
+                $"selected={(candidateIndex == selectedCandidateIndex ? "yes" : "no")} {errorName}={error:F8} " +
+                $"t=({cameraPosition.x:F5},{cameraPosition.y:F5},{cameraPosition.z:F5}) " +
+                $"R={FormatPoseRotationMatrix(poseCandidates, offset)} " +
+                $"cameraNormal=({rawCameraNormal.x:F5},{rawCameraNormal.y:F5},{rawCameraNormal.z:F5}) " +
+                $"worldNormal=({worldNormal.x:F5},{worldNormal.y:F5},{worldNormal.z:F5}) " +
+                $"stationaryReferenceDrift={referenceDrift}.");
+        }
+
+        Debug.Log(
+            $"[DJIAprilTag] Raw comparison estimator={estimatorName} selectedCandidate={selectedCandidateIndex} " +
+            $"selectedWorldNormal={(hasSelectedPose ? selectedWorldNormal.ToString("F5") : "unavailable")} " +
+            $"cameraAngularSpeed={cameraAngularSpeed:F2}deg/s " +
+            $"stationaryBaseline={(hasStationaryWorldNormalReference ? "available" : "waiting for a stationary frame")}.");
+    }
+
+    private bool TryGetRawEstimatorPose(
+        float[] poseCandidates,
+        int candidateIndex,
+        bool isOfficialAprilTagPose,
+        out Vector3 tagPosition,
+        out Quaternion cubeCameraRotation,
+        out Vector3 outwardNormal)
+    {
+        tagPosition = Vector3.zero;
+        cubeCameraRotation = Quaternion.identity;
+        outwardNormal = Vector3.zero;
+        if (candidateIndex < 0 || candidateIndex >= MaximumPoseCandidates)
+            return false;
+
+        var offset = candidateIndex * PoseCandidateStride;
+        if (!HasValidPoseCandidateError(poseCandidates, offset))
+            return false;
+
+        return isOfficialAprilTagPose
+            ? TryConvertOfficialAprilTagPose(poseCandidates, offset, out tagPosition, out cubeCameraRotation, out outwardNormal)
+            : TryConvertNativePose(offset, out tagPosition, out cubeCameraRotation, out outwardNormal);
+    }
+
+    private static int GetLowestErrorCandidateIndex(float[] poseCandidates)
+    {
+        var selectedCandidateIndex = -1;
+        var lowestError = float.PositiveInfinity;
+        for (var candidateIndex = 0; candidateIndex < MaximumPoseCandidates; ++candidateIndex)
+        {
+            var offset = candidateIndex * PoseCandidateStride;
+            if (!HasValidPoseCandidateError(poseCandidates, offset) || poseCandidates[offset + 12] >= lowestError)
+                continue;
+
+            lowestError = poseCandidates[offset + 12];
+            selectedCandidateIndex = candidateIndex;
+        }
+        return selectedCandidateIndex;
+    }
+
+    private static bool HasValidPoseCandidateError(float[] poseCandidates, int offset)
+    {
+        if (poseCandidates == null || offset < 0 || offset + PoseCandidateStride > poseCandidates.Length)
+            return false;
+
+        var error = poseCandidates[offset + 12];
+        return !float.IsNaN(error) && !float.IsInfinity(error) && error < float.MaxValue * 0.5f;
+    }
+
+    private static Vector3 GetCameraSpaceNormal(float[] poseCandidates, int offset)
+    {
+        return new Vector3(
+            poseCandidates[offset + 5],
+            poseCandidates[offset + 8],
+            poseCandidates[offset + 11]).normalized;
+    }
+
+    private static string FormatPoseRotationMatrix(float[] poseCandidates, int offset)
+    {
+        return $"[{poseCandidates[offset + 3]:F4},{poseCandidates[offset + 4]:F4},{poseCandidates[offset + 5]:F4};" +
+               $"{poseCandidates[offset + 6]:F4},{poseCandidates[offset + 7]:F4},{poseCandidates[offset + 8]:F4};" +
+               $"{poseCandidates[offset + 9]:F4},{poseCandidates[offset + 10]:F4},{poseCandidates[offset + 11]:F4}]";
+    }
+
+    private static bool TryConvertOfficialAprilTagPose(
+        float[] poseCandidates,
+        int offset,
+        out Vector3 tagPosition,
+        out Quaternion cubeCameraRotation,
+        out Vector3 outwardNormal)
+    {
+        // This is Keijiro's AprilTag-to-Unity reflection: R_unity = S * R * S
+        // and t_unity = S * t, where S = diag(1, -1, 1). The final fixed
+        // tag-to-cube rotation only maps the cube's bottom face onto the tag.
+        tagPosition = new Vector3(
+            poseCandidates[offset],
+            -poseCandidates[offset + 1],
+            poseCandidates[offset + 2]);
+        var tagRight = new Vector3(
+            poseCandidates[offset + 3],
+            -poseCandidates[offset + 6],
+            poseCandidates[offset + 9]);
+        var tagUp = new Vector3(
+            -poseCandidates[offset + 4],
+            poseCandidates[offset + 7],
+            -poseCandidates[offset + 10]);
+        var tagForward = new Vector3(
+            poseCandidates[offset + 5],
+            -poseCandidates[offset + 8],
+            poseCandidates[offset + 11]);
+
+        cubeCameraRotation = Quaternion.identity;
+        outwardNormal = Vector3.zero;
+        if (!IsFinite(tagPosition) || !IsFinite(tagRight) || !IsFinite(tagUp) || !IsFinite(tagForward) ||
+            tagRight.sqrMagnitude < 0.9f || tagUp.sqrMagnitude < 0.9f || tagForward.sqrMagnitude < 0.9f)
+        {
+            return false;
+        }
+
+        tagRight.Normalize();
+        tagUp = Vector3.ProjectOnPlane(tagUp, tagRight).normalized;
+        var measuredForward = Vector3.Cross(tagRight, tagUp).normalized;
+        tagForward.Normalize();
+        if (tagUp.sqrMagnitude < 0.9f || measuredForward.sqrMagnitude < 0.9f ||
+            Vector3.Dot(measuredForward, tagForward) < 0.95f)
+        {
+            return false;
+        }
+
+        var tagCameraRotation = Quaternion.LookRotation(measuredForward, tagUp);
+        cubeCameraRotation = tagCameraRotation * Quaternion.AngleAxis(-90f, Vector3.right);
+        outwardNormal = cubeCameraRotation * Vector3.up;
+        return IsFinite(outwardNormal);
+    }
+
     private int GetForcedCandidateIndex()
     {
         return poseCandidateDiagnosticMode switch
@@ -713,16 +943,16 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
     private Vector3 GetNativeCameraSpaceNormal(int offset)
     {
-        return new Vector3(
-            _nativePoseCandidates[offset + 5],
-            _nativePoseCandidates[offset + 8],
-            _nativePoseCandidates[offset + 11]).normalized;
+        return GetCameraSpaceNormal(_nativePoseCandidates, offset);
     }
 
     private void ResetNormalDiagnosticBaselines()
     {
         _hasWorldNormalReference = false;
         Array.Clear(_hasCandidateNormalBaselines, 0, _hasCandidateNormalBaselines.Length);
+        _hasOpenCvRawWorldNormalReference = false;
+        _hasOfficialRawWorldNormalReference = false;
+        _hasRawEstimatorDiagnosticCameraPose = false;
     }
 
     private void RecordCandidateNormalBaselines(

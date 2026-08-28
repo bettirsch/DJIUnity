@@ -41,6 +41,23 @@ internal static class DJIAprilTagNative
         int outDetectionLength,
         [Out] float[] outPoseCandidates,
         int outPoseCandidatesLength);
+
+    [DllImport("djiunity")]
+    private static extern int DJI_DetectAprilTagPoseComparisonRgba32(
+        byte[] rgbaBytes,
+        int width,
+        int height,
+        float fx,
+        float fy,
+        float cx,
+        float cy,
+        float tagSizeMeters,
+        [Out] float[] outDetection,
+        int outDetectionLength,
+        [Out] float[] outOpenCvPoseCandidates,
+        int outOpenCvPoseCandidatesLength,
+        [Out] float[] outOfficialPoseCandidates,
+        int outOfficialPoseCandidatesLength);
 #endif
 
     public static void SetTargetTagId(int tagId)
@@ -132,6 +149,43 @@ internal static class DJIAprilTagNative
             outDetection.Length,
             outPoseCandidates,
             outPoseCandidates.Length);
+#else
+        return 0;
+#endif
+    }
+
+    public static int TryDetectPoseCandidatesWithOfficialDiagnostics(
+        byte[] rgbaBytes,
+        int width,
+        int height,
+        float fx,
+        float fy,
+        float cx,
+        float cy,
+        float tagSizeMeters,
+        float[] outDetection,
+        float[] outOpenCvPoseCandidates,
+        float[] outOfficialPoseCandidates)
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        if (rgbaBytes == null || outDetection == null || outOpenCvPoseCandidates == null || outOfficialPoseCandidates == null)
+            return 0;
+
+        return DJI_DetectAprilTagPoseComparisonRgba32(
+            rgbaBytes,
+            width,
+            height,
+            fx,
+            fy,
+            cx,
+            cy,
+            tagSizeMeters,
+            outDetection,
+            outDetection.Length,
+            outOpenCvPoseCandidates,
+            outOpenCvPoseCandidates.Length,
+            outOfficialPoseCandidates,
+            outOfficialPoseCandidates.Length);
 #else
         return 0;
 #endif
