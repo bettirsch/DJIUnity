@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using Unity.Collections;
 using UnityEngine;
@@ -38,6 +39,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float MaximumContinuousRotationDeltaDegrees = 35f;
     private const float PendingPosePositionToleranceMeters = 0.025f;
     private const float PendingPoseRotationToleranceDegrees = 12f;
+    private const float DiagnosticLogIntervalSeconds = 0.5f;
 
     [SerializeField] private ARCameraManager cameraManager;
     [SerializeField] [Min(0.01f)] private float detectionIntervalSeconds = 0.03f;
@@ -68,6 +70,27 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private bool _hasReceivedCameraFrame;
     private float _cameraStartupTime;
     private float _lastCpuImageScanTime = float.NegativeInfinity;
+    private float _lastCpuImageDiagnosticLogTime = float.NegativeInfinity;
+    private float _lastWorldNormalDiagnosticLogTime = float.NegativeInfinity;
+    private bool _hasWorldNormalReference;
+    private Vector3 _worldNormalReference;
+    private bool _hasDiagnosticCameraPose;
+    private Pose _lastDiagnosticCameraPose;
+    private float _lastDiagnosticCameraPoseTime;
+
+    private readonly struct CameraFrameContext
+    {
+        public CameraFrameContext(Pose cameraPose, long? timestampNs, Matrix4x4? displayMatrix)
+        {
+            this.cameraPose = cameraPose;
+            this.timestampNs = timestampNs;
+            this.displayMatrix = displayMatrix;
+        }
+
+        public Pose cameraPose { get; }
+        public long? timestampNs { get; }
+        public Matrix4x4? displayMatrix { get; }
+    }
 
     private void Awake()
     {
@@ -116,7 +139,10 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         // The CPU image is acquired below from this exact AR camera callback.
         // Use the matching callback pose directly instead of comparing timestamps
         // from potentially different provider clocks.
-        var frameCameraPose = new Pose(targetCamera.transform.position, targetCamera.transform.rotation);
+        var frameContext = new CameraFrameContext(
+            new Pose(targetCamera.transform.position, targetCamera.transform.rotation),
+            frameArgs.timestampNs,
+            frameArgs.displayMatrix);
 
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (Time.unscaledTime - _lastCpuImageScanTime < detectionIntervalSeconds)
@@ -131,7 +157,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
         try
         {
-            ProcessCpuImage(image, frameCameraPose);
+            ProcessCpuImage(image, frameContext);
         }
         finally
         {
@@ -148,6 +174,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         {
             _previewCube.SetActive(false);
             _hasTrackedTagWorldPose = false;
+            _hasWorldNormalReference = false;
+            _hasDiagnosticCameraPose = false;
         }
     }
 
@@ -301,7 +329,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 #endif
     }
 
-    private void ProcessCpuImage(XRCpuImage image, Pose frameCameraPose)
+    private void ProcessCpuImage(XRCpuImage image, CameraFrameContext frameContext)
     {
         // ARCore intrinsics describe this unrotated CPU image, not the display texture.
         var conversion = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32)
@@ -339,8 +367,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                     _nativeDetection,
                     _nativePoseCandidates);
                 if (Mathf.RoundToInt(_nativeDetection[0]) == targetTagId)
-                    LogCpuImageDiagnostics(image, conversion, fx, fy, cx, cy, poseCandidateCount);
-                _hasTagPose = TrySelectWorldPose(poseCandidateCount, frameCameraPose);
+                    LogCpuImageDiagnostics(image, conversion, fx, fy, cx, cy, poseCandidateCount, frameContext);
+                _hasTagPose = TrySelectWorldPose(poseCandidateCount, frameContext, image.timestamp);
                 tagDetected = _hasTagPose || Mathf.RoundToInt(_nativeDetection[0]) == targetTagId;
             }
             else
@@ -418,18 +446,31 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         float fy,
         float cx,
         float cy,
-        int poseCandidateCount)
+        int poseCandidateCount,
+        CameraFrameContext frameContext)
     {
+        if (Time.unscaledTime - _lastCpuImageDiagnosticLogTime < DiagnosticLogIntervalSeconds)
+            return;
+
+        _lastCpuImageDiagnosticLogTime = Time.unscaledTime;
+        var frameTimestampSeconds = frameContext.timestampNs.HasValue ? frameContext.timestampNs.Value / 1_000_000_000.0 : double.NaN;
+        var timestampDeltaMilliseconds = frameContext.timestampNs.HasValue
+            ? Math.Abs(image.timestamp - frameTimestampSeconds) * 1000.0
+            : double.NaN;
+
         // The native detector receives precisely this unrotated converted buffer.
         Debug.Log(
             $"[DJIAprilTag] CPU/PnP input source={image.width}x{image.height} " +
-            $"converted={conversion.outputDimensions.x}x{conversion.outputDimensions.y} " +
-            $"format=RGBA32 transform=None (no rotation, crop, or mirror) " +
+            $"inputRect={conversion.inputRect} converted={conversion.outputDimensions.x}x{conversion.outputDimensions.y} " +
+            $"format=RGBA32 transform={conversion.transformation} (no rotation API; None means no crop, mirror, or resize unless dimensions differ) " +
             $"ARCoreIntrinsics={_cachedIntrinsics.resolution.x}x{_cachedIntrinsics.resolution.y} " +
             $"rawFxFy=({_cachedIntrinsics.focalLength.x:F3},{_cachedIntrinsics.focalLength.y:F3}) " +
             $"rawCxCy=({_cachedIntrinsics.principalPoint.x:F3},{_cachedIntrinsics.principalPoint.y:F3}) " +
             $"passedFxFyCxCy=({fx:F3},{fy:F3},{cx:F3},{cy:F3}) " +
-            $"IPPECandidates={poseCandidateCount}");
+            $"IPPECandidates={poseCandidateCount} cpuTimestamp={image.timestamp:F6}s frameTimestamp={frameTimestampSeconds:F6}s delta={timestampDeltaMilliseconds:F3}ms " +
+            $"screen={Screen.orientation}/{Screen.width}x{Screen.height} device={Input.deviceOrientation} " +
+            $"displayUv={DescribeDisplayUvTransform(frameContext.displayMatrix)} " +
+            $"OpenCvToUnityCameraBasis=(x,y,z)->(x,-y,z); no display-axis rotation is applied to PnP.");
     }
 
     private string BuildCameraStartupStatus()
@@ -477,13 +518,15 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _lastPoseUpdateTime = Time.unscaledTime;
     }
 
-    private bool TrySelectWorldPose(int poseCandidateCount, Pose cameraPose)
+    private bool TrySelectWorldPose(int poseCandidateCount, CameraFrameContext frameContext, double cpuImageTimestamp)
     {
+        var cameraPose = frameContext.cameraPose;
         var bestScore = float.PositiveInfinity;
         var hasBestCandidate = false;
         var bestTagPosition = Vector3.zero;
         var bestCubePosition = Vector3.zero;
         var bestCubeRotation = Quaternion.identity;
+        var bestWorldNormal = Vector3.zero;
         var bestCandidateIndex = -1;
         var candidateLimit = Mathf.Min(poseCandidateCount, MaximumPoseCandidates);
 
@@ -500,6 +543,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             var tagWorldPosition = cameraPose.position + cameraPose.rotation * tagPosition;
             var cubeWorldPosition = cameraPose.position + cameraPose.rotation * (tagPosition + outwardNormal * (PreviewCubeSizeMeters * 0.5f));
             var cubeWorldRotation = cameraPose.rotation * cubeCameraRotation;
+            var worldNormal = cameraPose.rotation * (cubeCameraRotation * Vector3.up);
 
             // A fixed marker should retain the same ARCore world pose between frames.
             var score = reprojectionError * 0.02f;
@@ -517,6 +561,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             bestTagPosition = tagWorldPosition;
             bestCubePosition = cubeWorldPosition;
             bestCubeRotation = cubeWorldRotation;
+            bestWorldNormal = worldNormal;
             bestCandidateIndex = candidateIndex;
         }
 
@@ -527,6 +572,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                 : "[DJIAprilTag] Unity rejected every raw OpenCV PnP candidate before world-pose selection.");
             return false;
         }
+
+        LogWorldNormalDiagnostics(bestCandidateIndex, bestWorldNormal, frameContext, cpuImageTimestamp);
 
         if (_hasTrackedTagWorldPose && !IsContinuousPose(bestTagPosition, bestCubeRotation))
         {
@@ -546,6 +593,66 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _hasTrackedTagWorldPose = true;
         Debug.Log($"[DJIAprilTag] Unity selected raw OpenCV PnP candidate={bestCandidateIndex} score={bestScore:F4}.");
         return true;
+    }
+
+    private void LogWorldNormalDiagnostics(
+        int candidateIndex,
+        Vector3 worldNormal,
+        CameraFrameContext frameContext,
+        double cpuImageTimestamp)
+    {
+        var now = Time.unscaledTime;
+        var angularSpeedDegreesPerSecond = 0f;
+        if (_hasDiagnosticCameraPose)
+        {
+            var elapsedSeconds = now - _lastDiagnosticCameraPoseTime;
+            if (elapsedSeconds > Mathf.Epsilon)
+                angularSpeedDegreesPerSecond = Quaternion.Angle(_lastDiagnosticCameraPose.rotation, frameContext.cameraPose.rotation) / elapsedSeconds;
+        }
+
+        _lastDiagnosticCameraPose = frameContext.cameraPose;
+        _lastDiagnosticCameraPoseTime = now;
+        _hasDiagnosticCameraPose = true;
+
+        if (!_hasWorldNormalReference)
+        {
+            _worldNormalReference = worldNormal;
+            _hasWorldNormalReference = true;
+        }
+
+        if (now - _lastWorldNormalDiagnosticLogTime < DiagnosticLogIntervalSeconds)
+            return;
+
+        _lastWorldNormalDiagnosticLogTime = now;
+        var normalDriftDegrees = Vector3.Angle(_worldNormalReference, worldNormal);
+        var frameTimestampSeconds = frameContext.timestampNs.HasValue ? frameContext.timestampNs.Value / 1_000_000_000.0 : double.NaN;
+        var timestampDeltaMilliseconds = frameContext.timestampNs.HasValue
+            ? Math.Abs(cpuImageTimestamp - frameTimestampSeconds) * 1000.0
+            : double.NaN;
+        Debug.Log(
+            $"[DJIAprilTag] World-normal candidate={candidateIndex} worldNormal=({worldNormal.x:F4},{worldNormal.y:F4},{worldNormal.z:F4}) " +
+            $"referenceDrift={normalDriftDegrees:F2}deg cameraAngularSpeed={angularSpeedDegreesPerSecond:F1}deg/s " +
+            $"cpuToFrameDelta={timestampDeltaMilliseconds:F3}ms " +
+            $"cameraWorldBasis R=({frameContext.cameraPose.rotation * Vector3.right}) " +
+            $"U=({frameContext.cameraPose.rotation * Vector3.up}) F=({frameContext.cameraPose.rotation * Vector3.forward})");
+    }
+
+    private static string DescribeDisplayUvTransform(Matrix4x4? displayMatrix)
+    {
+        if (!displayMatrix.HasValue)
+            return "unavailable";
+
+        var matrix = displayMatrix.Value;
+        var origin = TransformUv(matrix, 0f, 0f);
+        var uAxis = TransformUv(matrix, 1f, 0f) - origin;
+        var vAxis = TransformUv(matrix, 0f, 1f) - origin;
+        return $"origin={origin} U={uAxis} V={vAxis}";
+    }
+
+    private static Vector2 TransformUv(Matrix4x4 matrix, float u, float v)
+    {
+        var transformed = matrix * new Vector4(u, v, 0f, 1f);
+        return new Vector2(transformed.x / transformed.w, transformed.y / transformed.w);
     }
 
     private bool TryConvertNativePose(int offset, out Vector3 tagPosition, out Quaternion cubeCameraRotation, out Vector3 outwardNormal)
