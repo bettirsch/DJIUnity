@@ -963,7 +963,7 @@ internal static class PhoneAprilTagScanBootstrap
         if (SceneManager.GetActiveScene().name != "SampleScene")
             return;
 
-        var camera = Camera.main ?? Object.FindAnyObjectByType<Camera>();
+        var camera = Camera.main ?? UnityEngine.Object.FindAnyObjectByType<Camera>();
         if (camera != null && camera.GetComponent<PhoneAprilTagScanController>() == null)
             camera.gameObject.AddComponent<PhoneAprilTagScanController>();
     }
