@@ -11,6 +11,13 @@ using Unity.XR.CoreUtils;
 [DisallowMultipleComponent]
 public sealed class PhoneAprilTagScanController : MonoBehaviour
 {
+    private enum PoseCandidateDiagnosticMode
+    {
+        Auto,
+        ForceCandidate0,
+        ForceCandidate1
+    }
+
     private const string RuntimeCanvasName = "Phone AprilTag Scan Canvas";
     private const string DroneViewSceneName = "DroneView";
     private const string PreviewCubeName = "Phone AprilTag Preview Cube";
@@ -45,6 +52,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     [SerializeField] [Min(0.01f)] private float detectionIntervalSeconds = 0.03f;
     [SerializeField] [Min(1)] private int confirmationsRequired = 3;
     [SerializeField] private int targetTagId;
+    [SerializeField] private PoseCandidateDiagnosticMode poseCandidateDiagnosticMode;
 
     private readonly float[] _nativeDetection = new float[12];
     private readonly float[] _nativePoseCandidates = new float[PoseCandidateStride * MaximumPoseCandidates];
@@ -72,8 +80,17 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private float _lastCpuImageScanTime = float.NegativeInfinity;
     private float _lastCpuImageDiagnosticLogTime = float.NegativeInfinity;
     private float _lastWorldNormalDiagnosticLogTime = float.NegativeInfinity;
+    private float _lastCandidateDiagnosticLogTime = float.NegativeInfinity;
     private bool _hasWorldNormalReference;
     private Vector3 _worldNormalReference;
+    private readonly bool[] _hasCandidateNormalBaselines = new bool[MaximumPoseCandidates];
+    private readonly Vector3[] _candidateProductionNormalBaselines = new Vector3[MaximumPoseCandidates];
+    private readonly Vector3[] _candidateRawNormalBaselines = new Vector3[MaximumPoseCandidates];
+    private readonly Vector3[] _candidateYFlipNormalBaselines = new Vector3[MaximumPoseCandidates];
+    private readonly bool[] _candidateScoreAvailable = new bool[MaximumPoseCandidates];
+    private readonly float[] _candidateRmsScores = new float[MaximumPoseCandidates];
+    private readonly float[] _candidateTotalScores = new float[MaximumPoseCandidates];
+    private PoseCandidateDiagnosticMode _lastDiagnosticCandidateMode;
     private bool _hasDiagnosticCameraPose;
     private Pose _lastDiagnosticCameraPose;
     private float _lastDiagnosticCameraPoseTime;
@@ -106,6 +123,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         EnsurePhoneArCameraIsEnabled();
         _hasReceivedCameraFrame = false;
         _cameraStartupTime = Time.unscaledTime;
+        _lastDiagnosticCandidateMode = poseCandidateDiagnosticMode;
+        ResetNormalDiagnosticBaselines();
         if (cameraManager != null)
             cameraManager.frameReceived += OnCameraFrameReceived;
         StartCoroutine(ScanLoop());
@@ -174,7 +193,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         {
             _previewCube.SetActive(false);
             _hasTrackedTagWorldPose = false;
-            _hasWorldNormalReference = false;
+            ResetNormalDiagnosticBaselines();
             _hasDiagnosticCameraPose = false;
         }
     }
@@ -520,7 +539,21 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
     private bool TrySelectWorldPose(int poseCandidateCount, CameraFrameContext frameContext, double cpuImageTimestamp)
     {
+        if (poseCandidateDiagnosticMode != _lastDiagnosticCandidateMode)
+        {
+            _lastDiagnosticCandidateMode = poseCandidateDiagnosticMode;
+            _hasTrackedTagWorldPose = false;
+            _pendingPoseFrames = 0;
+            ResetNormalDiagnosticBaselines();
+            Debug.Log($"[DJIAprilTag] Candidate diagnostic mode changed to {poseCandidateDiagnosticMode}; cleared pose continuity and normal baselines.");
+        }
+
         var cameraPose = frameContext.cameraPose;
+        var forcedCandidateIndex = GetForcedCandidateIndex();
+        var logCandidateDiagnostics = Time.unscaledTime - _lastCandidateDiagnosticLogTime >= DiagnosticLogIntervalSeconds;
+        if (logCandidateDiagnostics)
+            _lastCandidateDiagnosticLogTime = Time.unscaledTime;
+        Array.Clear(_candidateScoreAvailable, 0, _candidateScoreAvailable.Length);
         var bestScore = float.PositiveInfinity;
         var hasBestCandidate = false;
         var bestTagPosition = Vector3.zero;
@@ -544,14 +577,43 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             var cubeWorldPosition = cameraPose.position + cameraPose.rotation * (tagPosition + outwardNormal * (PreviewCubeSizeMeters * 0.5f));
             var cubeWorldRotation = cameraPose.rotation * cubeCameraRotation;
             var worldNormal = cameraPose.rotation * (cubeCameraRotation * Vector3.up);
+            var cameraSpaceNormal = GetNativeCameraSpaceNormal(offset);
+            var worldNormalRaw = cameraPose.rotation * cameraSpaceNormal;
+            var worldNormalYFlip = cameraPose.rotation * new Vector3(cameraSpaceNormal.x, -cameraSpaceNormal.y, cameraSpaceNormal.z);
 
             // A fixed marker should retain the same ARCore world pose between frames.
-            var score = reprojectionError * 0.02f;
+            var reprojectionScore = reprojectionError * 0.02f;
+            var positionContinuityScore = 0f;
+            var rotationContinuityScore = 0f;
             if (_hasTrackedTagWorldPose)
             {
-                score += Vector3.Distance(tagWorldPosition, _trackedTagWorldPosition) / 0.04f;
-                score += Quaternion.Angle(cubeWorldRotation, _trackedTagWorldRotation) / 15f;
+                positionContinuityScore = Vector3.Distance(tagWorldPosition, _trackedTagWorldPosition) / 0.04f;
+                rotationContinuityScore = Quaternion.Angle(cubeWorldRotation, _trackedTagWorldRotation) / 15f;
             }
+            var score = reprojectionScore + positionContinuityScore + rotationContinuityScore;
+            _candidateScoreAvailable[candidateIndex] = true;
+            _candidateRmsScores[candidateIndex] = reprojectionError;
+            _candidateTotalScores[candidateIndex] = score;
+
+            RecordCandidateNormalBaselines(candidateIndex, worldNormal, worldNormalRaw, worldNormalYFlip);
+            if (logCandidateDiagnostics)
+            {
+                LogCandidateDiagnostics(
+                    candidateIndex,
+                    reprojectionError,
+                    reprojectionScore,
+                    positionContinuityScore,
+                    rotationContinuityScore,
+                    score,
+                    cameraSpaceNormal,
+                    worldNormal,
+                    worldNormalRaw,
+                    worldNormalYFlip,
+                    forcedCandidateIndex);
+            }
+
+            if (forcedCandidateIndex >= 0 && candidateIndex != forcedCandidateIndex)
+                continue;
 
             if (score >= bestScore)
                 continue;
@@ -574,8 +636,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         }
 
         LogWorldNormalDiagnostics(bestCandidateIndex, bestWorldNormal, frameContext, cpuImageTimestamp);
+        if (logCandidateDiagnostics)
+            LogCandidateSelectionDecision(bestCandidateIndex, forcedCandidateIndex);
 
-        if (_hasTrackedTagWorldPose && !IsContinuousPose(bestTagPosition, bestCubeRotation))
+        var forceCandidate = forcedCandidateIndex >= 0;
+        if (!forceCandidate && _hasTrackedTagWorldPose && !IsContinuousPose(bestTagPosition, bestCubeRotation))
         {
             TrackPendingPose(bestTagPosition, bestCubeRotation);
             if (_pendingPoseFrames < PoseSwitchConfirmationFrames)
@@ -591,8 +656,103 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _selectedCubeWorldPosition = bestCubePosition;
         _selectedCubeWorldRotation = bestCubeRotation;
         _hasTrackedTagWorldPose = true;
-        Debug.Log($"[DJIAprilTag] Unity selected raw OpenCV PnP candidate={bestCandidateIndex} score={bestScore:F4}.");
+        Debug.Log(
+            $"[DJIAprilTag] Unity selected raw OpenCV PnP candidate={bestCandidateIndex} " +
+            $"mode={poseCandidateDiagnosticMode} score={bestScore:F4} " +
+            $"reason={(forceCandidate ? \"forced diagnostic selection\" : \"lowest reprojection + position-continuity + rotation-continuity score\")}.");
         return true;
+    }
+
+    private int GetForcedCandidateIndex()
+    {
+        return poseCandidateDiagnosticMode switch
+        {
+            PoseCandidateDiagnosticMode.ForceCandidate0 => 0,
+            PoseCandidateDiagnosticMode.ForceCandidate1 => 1,
+            _ => -1
+        };
+    }
+
+    private Vector3 GetNativeCameraSpaceNormal(int offset)
+    {
+        return new Vector3(
+            _nativePoseCandidates[offset + 5],
+            _nativePoseCandidates[offset + 8],
+            _nativePoseCandidates[offset + 11]).normalized;
+    }
+
+    private void ResetNormalDiagnosticBaselines()
+    {
+        _hasWorldNormalReference = false;
+        Array.Clear(_hasCandidateNormalBaselines, 0, _hasCandidateNormalBaselines.Length);
+    }
+
+    private void RecordCandidateNormalBaselines(
+        int candidateIndex,
+        Vector3 productionWorldNormal,
+        Vector3 rawWorldNormal,
+        Vector3 yFlipWorldNormal)
+    {
+        if (_hasCandidateNormalBaselines[candidateIndex])
+            return;
+
+        _candidateProductionNormalBaselines[candidateIndex] = productionWorldNormal;
+        _candidateRawNormalBaselines[candidateIndex] = rawWorldNormal;
+        _candidateYFlipNormalBaselines[candidateIndex] = yFlipWorldNormal;
+        _hasCandidateNormalBaselines[candidateIndex] = true;
+    }
+
+    private void LogCandidateDiagnostics(
+        int candidateIndex,
+        float reprojectionError,
+        float reprojectionScore,
+        float positionContinuityScore,
+        float rotationContinuityScore,
+        float totalScore,
+        Vector3 cameraSpaceNormal,
+        Vector3 productionWorldNormal,
+        Vector3 rawWorldNormal,
+        Vector3 yFlipWorldNormal,
+        int forcedCandidateIndex)
+    {
+        var productionDrift = Vector3.Angle(_candidateProductionNormalBaselines[candidateIndex], productionWorldNormal);
+        var rawDrift = Vector3.Angle(_candidateRawNormalBaselines[candidateIndex], rawWorldNormal);
+        var yFlipDrift = Vector3.Angle(_candidateYFlipNormalBaselines[candidateIndex], yFlipWorldNormal);
+        var selection = forcedCandidateIndex < 0
+            ? "auto"
+            : forcedCandidateIndex == candidateIndex ? "forced-selected" : "forced-skipped";
+        Debug.Log(
+            $"[DJIAprilTag] Candidate diagnostic index={candidateIndex} selection={selection} " +
+            $"rms={reprojectionError:F4} score(reproj={reprojectionScore:F4},pos={positionContinuityScore:F4},rot={rotationContinuityScore:F4},total={totalScore:F4}) " +
+            $"normalCv=({cameraSpaceNormal.x:F4},{cameraSpaceNormal.y:F4},{cameraSpaceNormal.z:F4}) " +
+            $"worldNormalProduction=({productionWorldNormal.x:F4},{productionWorldNormal.y:F4},{productionWorldNormal.z:F4}) drift={productionDrift:F2}deg " +
+            $"worldNormalRaw=({rawWorldNormal.x:F4},{rawWorldNormal.y:F4},{rawWorldNormal.z:F4}) drift={rawDrift:F2}deg " +
+            $"worldNormalYFlip=({yFlipWorldNormal.x:F4},{yFlipWorldNormal.y:F4},{yFlipWorldNormal.z:F4}) drift={yFlipDrift:F2}deg.");
+    }
+
+    private void LogCandidateSelectionDecision(int selectedCandidateIndex, int forcedCandidateIndex)
+    {
+        if (forcedCandidateIndex >= 0)
+        {
+            Debug.Log($"[DJIAprilTag] Candidate selection explanation: candidate={selectedCandidateIndex} was selected because {poseCandidateDiagnosticMode} forces it; RMS and continuity scores were not used to choose it.");
+            return;
+        }
+
+        var lowestRmsCandidateIndex = -1;
+        var lowestRms = float.PositiveInfinity;
+        for (var candidateIndex = 0; candidateIndex < MaximumPoseCandidates; ++candidateIndex)
+        {
+            if (!_candidateScoreAvailable[candidateIndex] || _candidateRmsScores[candidateIndex] >= lowestRms)
+                continue;
+
+            lowestRms = _candidateRmsScores[candidateIndex];
+            lowestRmsCandidateIndex = candidateIndex;
+        }
+
+        var explanation = selectedCandidateIndex == lowestRmsCandidateIndex
+            ? "it has the lowest reprojection RMS for this frame"
+            : $"its total score={_candidateTotalScores[selectedCandidateIndex]:F4} is lower after position/rotation continuity terms than candidate {lowestRmsCandidateIndex}, despite that candidate having lower RMS={lowestRms:F4}";
+        Debug.Log($"[DJIAprilTag] Candidate selection explanation: candidate={selectedCandidateIndex} selected because {explanation}.");
     }
 
     private void LogWorldNormalDiagnostics(
