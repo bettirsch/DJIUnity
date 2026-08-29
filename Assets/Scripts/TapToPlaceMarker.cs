@@ -173,10 +173,12 @@ public sealed class TapToPlaceMarker : MonoBehaviour
                 if (verboseLogs)
                     Debug.Log("[DJI] TapToPlace ground plane miss, falling back to camera plane");
 
+                usedGroundPlane = false;
                 plane = new Plane(
                     -targetCamera.transform.forward,
                     targetCamera.transform.position + targetCamera.transform.forward * anchorDistance
                 );
+
                 if (!plane.Raycast(ray, out enter))
                     return;
             }
@@ -190,12 +192,17 @@ public sealed class TapToPlaceMarker : MonoBehaviour
             return;
 
         transform.position = ray.GetPoint(enter);
+
         _hasAnchor = true;
         _loggedMissingGroundPlane = false;
         SetVisible(true);
 
         if (verboseLogs)
-            Debug.Log($"[DJI] TapToPlace placed marker at {transform.position} using {(usedGroundPlane ? "ground plane" : "camera plane")}");
+        {
+            var placementMode = usedGroundPlane ? "ground plane" : "camera plane";
+
+            Debug.Log($"[DJI] TapToPlace placed marker at {transform.position} using {placementMode}");
+        }
     }
 
     private void SetVisible(bool visible)
