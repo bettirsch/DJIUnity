@@ -1254,6 +1254,12 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     {
         var newestIndex = diagnostic.heldPoses.Count - 1;
         var newestPose = diagnostic.heldPoses[newestIndex];
+        var baselinePose = diagnostic.heldPoses[0];
+        var baselineRelative = Quaternion.Inverse(baselinePose.worldCameraRotation) * newestPose.worldCameraRotation;
+        var baselineAngle = Quaternion.Angle(baselinePose.worldCameraRotation, newestPose.worldCameraRotation);
+        var controlledTiltClass = newestIndex == 0
+            ? "baseline"
+            : ClassifyRelativeRotationAxis(baselineRelative, baselineAngle);
         for (var priorIndex = 0; priorIndex < newestIndex; ++priorIndex)
         {
             var priorPose = diagnostic.heldPoses[priorIndex];
@@ -1263,7 +1269,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             var relativeAxisLabel = ClassifyRelativeRotationAxis(arCoreRelative, arCoreAngle);
             Debug.Log(
                 $"[DJIAprilTag] Relative-rotation consistency candidate={diagnostic.candidateIndex} " +
-                $"heldPair={priorIndex}->{newestIndex} axisClass={relativeAxisLabel} " +
+                $"heldPair={priorIndex}->{newestIndex} pairAxisClass={relativeAxisLabel} " +
+                $"controlledTiltFromBaseline={controlledTiltClass} baselineRelativeAngle={baselineAngle:F2}deg " +
                 $"ARCoreRelativeAngle={arCoreAngle:F2}deg AprilTagRelativeAngle={aprilTagAngle:F2}deg " +
                 $"absoluteAngleDifference={Mathf.Abs(arCoreAngle - aprilTagAngle):F2}deg.");
         }
