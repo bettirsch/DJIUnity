@@ -135,11 +135,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         new(0),
         new(1)
     };
-    private readonly RelativeRotationDiagnostic[] _openCvRelativeRotationDiagnostics =
-    {
-        new(0),
-        new(1)
-    };
+    private readonly RelativeRotationDiagnostic _openCvRelativeRotationDiagnostic = new();
     private bool _hasLoggedHandEyeConventionAudit;
 
     private readonly struct CameraFrameContext
@@ -302,29 +298,33 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
 
     private readonly struct HeldRotationPose
     {
-        public HeldRotationPose(Quaternion worldCameraRotation, float[] rawCameraTagRotation)
+        public HeldRotationPose(
+            Quaternion worldCameraRotation,
+            float[] rawCandidate0CameraTagRotation,
+            float[] rawCandidate1CameraTagRotation)
         {
             this.worldCameraRotation = worldCameraRotation;
-            this.rawCameraTagRotation = rawCameraTagRotation;
+            this.rawCandidate0CameraTagRotation = rawCandidate0CameraTagRotation;
+            this.rawCandidate1CameraTagRotation = rawCandidate1CameraTagRotation;
         }
 
         public Quaternion worldCameraRotation { get; }
-        public float[] rawCameraTagRotation { get; }
+        public float[] rawCandidate0CameraTagRotation { get; }
+        public float[] rawCandidate1CameraTagRotation { get; }
     }
 
     private sealed class RelativeRotationDiagnostic
     {
-        public RelativeRotationDiagnostic(int candidateIndex)
-        {
-            this.candidateIndex = candidateIndex;
-        }
-
-        public int candidateIndex { get; }
         public readonly List<HeldRotationPose> heldPoses = new();
 
         private int _consecutiveStationaryFrames;
+        private readonly HashSet<string> _capturedControlledTiltClasses = new();
 
-        public bool TryCaptureHeldPose(Quaternion worldCameraRotation, float[] rawCameraTagRotation, float cameraAngularSpeed)
+        public bool TryCaptureHeldPose(
+            Quaternion worldCameraRotation,
+            float[] rawCandidate0CameraTagRotation,
+            float[] rawCandidate1CameraTagRotation,
+            float cameraAngularSpeed)
         {
             if (cameraAngularSpeed > StationaryCameraAngularSpeedDegreesPerSecond)
             {
@@ -339,13 +339,23 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                 return false;
             }
 
-            if (heldPoses.Count > 0 &&
-                Quaternion.Angle(heldPoses[heldPoses.Count - 1].worldCameraRotation, worldCameraRotation) < MinimumHeldPoseSeparationDegrees)
+            if (heldPoses.Count > 0)
             {
-                return false;
+                var baselinePose = heldPoses[0];
+                var baselineRelative = Quaternion.Inverse(baselinePose.worldCameraRotation) * worldCameraRotation;
+                var baselineAngle = Quaternion.Angle(baselinePose.worldCameraRotation, worldCameraRotation);
+                var controlledTiltClass = ClassifyRelativeRotationAxis(baselineRelative, baselineAngle);
+                if (controlledTiltClass is not ("+X" or "-X" or "+Y" or "-Y") ||
+                    !_capturedControlledTiltClasses.Add(controlledTiltClass))
+                {
+                    return false;
+                }
             }
 
-            heldPoses.Add(new HeldRotationPose(worldCameraRotation, rawCameraTagRotation));
+            heldPoses.Add(new HeldRotationPose(
+                worldCameraRotation,
+                rawCandidate0CameraTagRotation,
+                rawCandidate1CameraTagRotation));
             _consecutiveStationaryFrames = 0;
             return true;
         }
@@ -354,6 +364,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         {
             heldPoses.Clear();
             _consecutiveStationaryFrames = 0;
+            _capturedControlledTiltClasses.Clear();
         }
     }
 
@@ -1203,22 +1214,27 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                 "The relative-angle test below uses raw R_camera_tag matrices directly, before S or B.");
         }
 
-        for (var candidateIndex = 0; candidateIndex < MaximumPoseCandidates; ++candidateIndex)
+        var candidate0Offset = 0;
+        var candidate1Offset = PoseCandidateStride;
+        if (!HasValidPoseCandidateError(_nativePoseCandidates, candidate0Offset) ||
+            !HasValidPoseCandidateError(_nativePoseCandidates, candidate1Offset))
         {
-            var offset = candidateIndex * PoseCandidateStride;
-            if (!HasValidPoseCandidateError(_nativePoseCandidates, offset))
-                continue;
-
-            var rawRotation = CopyRawRotationMatrix(_nativePoseCandidates, offset);
-            if (!IsValidRawRotationMatrix(rawRotation) ||
-                !_openCvRelativeRotationDiagnostics[candidateIndex].TryCaptureHeldPose(
-                    frameContext.cameraPose.rotation, rawRotation, cameraAngularSpeed))
-            {
-                continue;
-            }
-
-            LogRelativeRotationPairs(_openCvRelativeRotationDiagnostics[candidateIndex]);
+            return;
         }
+
+        var rawCandidate0Rotation = CopyRawRotationMatrix(_nativePoseCandidates, candidate0Offset);
+        var rawCandidate1Rotation = CopyRawRotationMatrix(_nativePoseCandidates, candidate1Offset);
+        if (!IsValidRawRotationMatrix(rawCandidate0Rotation) || !IsValidRawRotationMatrix(rawCandidate1Rotation) ||
+            !_openCvRelativeRotationDiagnostic.TryCaptureHeldPose(
+                frameContext.cameraPose.rotation,
+                rawCandidate0Rotation,
+                rawCandidate1Rotation,
+                cameraAngularSpeed))
+        {
+            return;
+        }
+
+        LogRelativeRotationPairs(_openCvRelativeRotationDiagnostic);
     }
 
     private static float[] CopyRawRotationMatrix(float[] poseCandidates, int offset)
@@ -1265,14 +1281,20 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             var priorPose = diagnostic.heldPoses[priorIndex];
             var arCoreRelative = Quaternion.Inverse(priorPose.worldCameraRotation) * newestPose.worldCameraRotation;
             var arCoreAngle = Quaternion.Angle(priorPose.worldCameraRotation, newestPose.worldCameraRotation);
-            var aprilTagAngle = GetRawRotationAngleDegrees(priorPose.rawCameraTagRotation, newestPose.rawCameraTagRotation);
+            var candidate0AprilTagAngle = GetRawRotationAngleDegrees(
+                priorPose.rawCandidate0CameraTagRotation,
+                newestPose.rawCandidate0CameraTagRotation);
+            var candidate1AprilTagAngle = GetRawRotationAngleDegrees(
+                priorPose.rawCandidate1CameraTagRotation,
+                newestPose.rawCandidate1CameraTagRotation);
             var relativeAxisLabel = ClassifyRelativeRotationAxis(arCoreRelative, arCoreAngle);
             Debug.Log(
-                $"[DJIAprilTag] Relative-rotation consistency candidate={diagnostic.candidateIndex} " +
+                "[DJIAprilTag] Relative-rotation consistency commonFrameCandidates=0,1 " +
                 $"heldPair={priorIndex}->{newestIndex} pairAxisClass={relativeAxisLabel} " +
                 $"controlledTiltFromBaseline={controlledTiltClass} baselineRelativeAngle={baselineAngle:F2}deg " +
-                $"ARCoreRelativeAngle={arCoreAngle:F2}deg AprilTagRelativeAngle={aprilTagAngle:F2}deg " +
-                $"absoluteAngleDifference={Mathf.Abs(arCoreAngle - aprilTagAngle):F2}deg.");
+                $"ARCoreRelativeAngle={arCoreAngle:F2}deg " +
+                $"candidate0AprilTagRelativeAngle={candidate0AprilTagAngle:F2}deg candidate0AbsoluteAngleDifference={Mathf.Abs(arCoreAngle - candidate0AprilTagAngle):F2}deg " +
+                $"candidate1AprilTagRelativeAngle={candidate1AprilTagAngle:F2}deg candidate1AbsoluteAngleDifference={Mathf.Abs(arCoreAngle - candidate1AprilTagAngle):F2}deg.");
         }
     }
 
@@ -1885,8 +1907,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             diagnostic.Reset();
         foreach (var diagnostic in _openCvHandEyeDiagnostics)
             diagnostic.Reset();
-        foreach (var diagnostic in _openCvRelativeRotationDiagnostics)
-            diagnostic.Reset();
+        _openCvRelativeRotationDiagnostic.Reset();
         _hasLoggedHandEyeConventionAudit = false;
     }
 
