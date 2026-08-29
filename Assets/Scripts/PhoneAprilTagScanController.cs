@@ -47,18 +47,14 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const int TagPixelSizeOffset = 14;
     private const int FrontoParallelCosineOffset = 15;
     private const int MaximumPoseCandidates = 2;
-    private const int PoseSwitchConfirmationFrames = 4;
     private const float MaximumContinuousPositionDeltaMeters = 0.08f;
     private const float MaximumContinuousRotationDeltaDegrees = 35f;
-    private const float PendingPosePositionToleranceMeters = 0.025f;
-    private const float PendingPoseRotationToleranceDegrees = 12f;
     private const float MaximumAcceptedReprojectionRmsPixels = 12f;
     private const float MaximumAcceptedCornerResidualPixels = 11f;
     private const float MinimumAcceptedTagPixelSize = 42f;
-    private const float NearFrontoParallelCosine = 0.94f;
-    private const float WeakMeasurementConfidence = 0.52f;
-    private const float MaximumWeakMeasurementNormalJumpDegrees = 7f;
-    private const float MaximumWeakMeasurementPositionJumpMeters = 0.035f;
+    private const float AmbiguousPlanarRmsDeltaPixels = 0.5f;
+    private const float AmbiguousPlanarRelativeRmsDelta = 0.10f;
+    private const float AmbiguousPlanarNormalSeparationDegrees = 20f;
     private const float PositionFilterTimeConstantSeconds = 0.12f;
     private const float RotationFilterTimeConstantSeconds = 0.16f;
     private const float MinimumFilterConfidence = 0.18f;
@@ -110,9 +106,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private Quaternion _lastAcceptedTagWorldRotation;
     private Vector3 _lastAcceptedWorldNormal;
     private bool _hasLastAcceptedMeasurement;
-    private Vector3 _pendingTagWorldPosition;
-    private Quaternion _pendingTagWorldRotation;
-    private int _pendingPoseFrames;
     private float _lastPoseFilterTime = float.NegativeInfinity;
     private bool _hasReceivedCameraFrame;
     private float _cameraStartupTime;
@@ -130,6 +123,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private readonly bool[] _candidateScoreAvailable = new bool[MaximumPoseCandidates];
     private readonly float[] _candidateRmsScores = new float[MaximumPoseCandidates];
     private readonly float[] _candidateTotalScores = new float[MaximumPoseCandidates];
+    private readonly bool[] _worldPoseCandidateAvailable = new bool[MaximumPoseCandidates];
+    private readonly WorldPoseCandidate[] _worldPoseCandidates = new WorldPoseCandidate[MaximumPoseCandidates];
     private PoseCandidateDiagnosticMode _lastDiagnosticCandidateMode;
     private bool _hasDiagnosticCameraPose;
     private Pose _lastDiagnosticCameraPose;
@@ -202,6 +197,67 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         public float normalJumpDegrees { get; }
         public float positionJumpMeters { get; }
         public string reason { get; }
+    }
+
+    private readonly struct WorldPoseCandidate
+    {
+        public WorldPoseCandidate(
+            int index,
+            Vector3 tagWorldPosition,
+            Quaternion cubeWorldRotation,
+            Vector3 worldNormal,
+            PoseMeasurementQuality quality,
+            float score)
+        {
+            this.index = index;
+            this.tagWorldPosition = tagWorldPosition;
+            this.cubeWorldRotation = cubeWorldRotation;
+            this.worldNormal = worldNormal;
+            this.quality = quality;
+            this.score = score;
+        }
+
+        public int index { get; }
+        public Vector3 tagWorldPosition { get; }
+        public Quaternion cubeWorldRotation { get; }
+        public Vector3 worldNormal { get; }
+        public PoseMeasurementQuality quality { get; }
+        public float score { get; }
+    }
+
+    private readonly struct PlanarPoseAmbiguity
+    {
+        public PlanarPoseAmbiguity(
+            bool isAmbiguous,
+            float rms0,
+            float rms1,
+            float rmsDelta,
+            float relativeRmsDelta,
+            float normalSeparationDegrees,
+            float rotationSeparationDegrees,
+            float candidate0DeltaFromReliableDegrees,
+            float candidate1DeltaFromReliableDegrees)
+        {
+            this.isAmbiguous = isAmbiguous;
+            this.rms0 = rms0;
+            this.rms1 = rms1;
+            this.rmsDelta = rmsDelta;
+            this.relativeRmsDelta = relativeRmsDelta;
+            this.normalSeparationDegrees = normalSeparationDegrees;
+            this.rotationSeparationDegrees = rotationSeparationDegrees;
+            this.candidate0DeltaFromReliableDegrees = candidate0DeltaFromReliableDegrees;
+            this.candidate1DeltaFromReliableDegrees = candidate1DeltaFromReliableDegrees;
+        }
+
+        public bool isAmbiguous { get; }
+        public float rms0 { get; }
+        public float rms1 { get; }
+        public float rmsDelta { get; }
+        public float relativeRmsDelta { get; }
+        public float normalSeparationDegrees { get; }
+        public float rotationSeparationDegrees { get; }
+        public float candidate0DeltaFromReliableDegrees { get; }
+        public float candidate1DeltaFromReliableDegrees { get; }
     }
 
     private readonly struct CameraFrameContext
@@ -968,7 +1024,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         {
             _lastDiagnosticCandidateMode = poseCandidateDiagnosticMode;
             _hasTrackedTagWorldPose = false;
-            _pendingPoseFrames = 0;
             _lastPoseFilterTime = float.NegativeInfinity;
             ResetNormalDiagnosticBaselines();
             Debug.Log($"[DJIAprilTag] Candidate diagnostic mode changed to {poseCandidateDiagnosticMode}; cleared pose continuity and normal baselines.");
@@ -980,14 +1035,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         if (logCandidateDiagnostics)
             _lastCandidateDiagnosticLogTime = Time.unscaledTime;
         Array.Clear(_candidateScoreAvailable, 0, _candidateScoreAvailable.Length);
+        Array.Clear(_worldPoseCandidateAvailable, 0, _worldPoseCandidateAvailable.Length);
         var bestScore = float.PositiveInfinity;
         var bestReprojectionError = float.PositiveInfinity;
         var hasBestCandidate = false;
-        var bestTagPosition = Vector3.zero;
-        var bestCubeRotation = Quaternion.identity;
-        var bestWorldNormal = Vector3.zero;
-        var bestQuality = default(PoseMeasurementQuality);
-        var bestCandidateIndex = -1;
+        var bestCandidate = default(WorldPoseCandidate);
         var candidateLimit = Mathf.Min(poseCandidateCount, MaximumPoseCandidates);
 
         for (var candidateIndex = 0; candidateIndex < candidateLimit; ++candidateIndex)
@@ -1021,6 +1073,14 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             _candidateScoreAvailable[candidateIndex] = true;
             _candidateRmsScores[candidateIndex] = reprojectionError;
             _candidateTotalScores[candidateIndex] = score;
+            _worldPoseCandidateAvailable[candidateIndex] = true;
+            _worldPoseCandidates[candidateIndex] = new WorldPoseCandidate(
+                candidateIndex,
+                tagWorldPosition,
+                cubeWorldRotation,
+                worldNormal,
+                quality,
+                score);
 
             RecordCandidateNormalBaselines(candidateIndex, worldNormal, worldNormalRaw, worldNormalYFlip);
             if (logCandidateDiagnostics)
@@ -1052,11 +1112,43 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             bestReprojectionError = reprojectionError;
             bestScore = score;
             hasBestCandidate = true;
-            bestTagPosition = tagWorldPosition;
-            bestCubeRotation = cubeWorldRotation;
-            bestWorldNormal = worldNormal;
-            bestQuality = quality;
-            bestCandidateIndex = candidateIndex;
+            bestCandidate = _worldPoseCandidates[candidateIndex];
+        }
+
+        var ambiguity = GetPlanarPoseAmbiguity();
+        if (ambiguity.isAmbiguous && forcedCandidateIndex < 0)
+        {
+            if (!_hasLastAcceptedMeasurement)
+            {
+                LogPlanarPoseAmbiguity(ambiguity, rotationHeld: true, selectedCandidate: -1, "WAITING_FOR_RELIABLE_ORIENTATION");
+                Debug.Log("[DJIAprilTag] WAITING_FOR_RELIABLE_ORIENTATION: two planar solutions have near-equal image evidence, so no arbitrary initial rotation was accepted.");
+                return false;
+            }
+
+            var selectedCandidate = SelectCandidateClosestToReliableRotation();
+            var positionDecision = EvaluateMeasurement(
+                selectedCandidate.tagWorldPosition,
+                selectedCandidate.cubeWorldRotation,
+                selectedCandidate.worldNormal,
+                selectedCandidate.quality);
+            var selectionReason = "AMBIGUOUS_PLANAR_POSE: held last reliable rotation and selected the position closest to the ARCore world-pose prior";
+            LogPlanarPoseAmbiguity(ambiguity, rotationHeld: true, selectedCandidate.index, selectionReason);
+            if (!positionDecision.accepted)
+            {
+                LogPoseMeasurementValidation(selectedCandidate.index, selectedCandidate.worldNormal, selectedCandidate.quality, positionDecision, rotationHeld: true, selectionReason);
+                HoldLastReliableWorldPose();
+                return true;
+            }
+
+            ApplyFilteredWorldPose(
+                selectedCandidate.tagWorldPosition,
+                _trackedTagWorldRotation,
+                positionDecision.confidence,
+                updatePosition: true,
+                updateRotation: false);
+            _lastAcceptedTagWorldPosition = selectedCandidate.tagWorldPosition;
+            LogPoseMeasurementValidation(selectedCandidate.index, selectedCandidate.worldNormal, selectedCandidate.quality, positionDecision, rotationHeld: true, selectionReason);
+            return true;
         }
 
         if (!hasBestCandidate)
@@ -1068,14 +1160,13 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         }
 
         var measurementDecision = EvaluateMeasurement(
-            bestTagPosition,
-            bestCubeRotation,
-            bestWorldNormal,
-            bestQuality,
-            frameContext.cameraPose);
+            bestCandidate.tagWorldPosition,
+            bestCandidate.cubeWorldRotation,
+            bestCandidate.worldNormal,
+            bestCandidate.quality);
         if (!measurementDecision.accepted)
         {
-            LogPoseMeasurementValidation(bestCandidateIndex, bestWorldNormal, bestQuality, measurementDecision);
+            LogPoseMeasurementValidation(bestCandidate.index, bestCandidate.worldNormal, bestCandidate.quality, measurementDecision, rotationHeld: _hasTrackedTagWorldPose, measurementDecision.reason);
             if (_hasTrackedTagWorldPose)
             {
                 HoldLastReliableWorldPose();
@@ -1085,47 +1176,60 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             return false;
         }
 
-        LogWorldNormalDiagnostics(bestCandidateIndex, bestWorldNormal, frameContext, cpuImageTimestamp);
-        if (logCandidateDiagnostics)
-            LogCandidateSelectionDecision(bestCandidateIndex, forcedCandidateIndex);
-
-        if (_hasTrackedTagWorldPose && !IsContinuousPose(bestTagPosition, bestCubeRotation))
+        var rotationDeltaFromReliable = _hasLastAcceptedMeasurement
+            ? Quaternion.Angle(bestCandidate.cubeWorldRotation, _lastAcceptedTagWorldRotation)
+            : 0f;
+        if (_hasLastAcceptedMeasurement && rotationDeltaFromReliable > MaximumContinuousRotationDeltaDegrees)
         {
-            TrackPendingPose(bestTagPosition, bestCubeRotation);
-            if (_pendingPoseFrames < PoseSwitchConfirmationFrames)
-            {
-                LogPoseMeasurementValidation(
-                    bestCandidateIndex,
-                    bestWorldNormal,
-                    bestQuality,
-                    new PoseMeasurementDecision(false, measurementDecision.confidence, measurementDecision.normalJumpDegrees, measurementDecision.positionJumpMeters, "temporal continuity gate"));
-                Debug.Log($"[DJIAprilTag] Unity pose selection candidate={bestCandidateIndex} deferred by continuity gate ({_pendingPoseFrames}/{PoseSwitchConfirmationFrames}).");
-                return true;
-            }
+            var selectionReason = "rotation conflicts with the ARCore world-pose prior; no branch change without temporal consistency";
+            ApplyFilteredWorldPose(
+                bestCandidate.tagWorldPosition,
+                _trackedTagWorldRotation,
+                measurementDecision.confidence,
+                updatePosition: true,
+                updateRotation: false);
+            _lastAcceptedTagWorldPosition = bestCandidate.tagWorldPosition;
+            LogPoseMeasurementValidation(bestCandidate.index, bestCandidate.worldNormal, bestCandidate.quality, measurementDecision, rotationHeld: true, selectionReason);
+            return true;
         }
 
-        _pendingPoseFrames = 0;
-        ApplyFilteredWorldPose(bestTagPosition, bestCubeRotation, measurementDecision.confidence);
+        LogWorldNormalDiagnostics(bestCandidate.index, bestCandidate.worldNormal, frameContext, cpuImageTimestamp);
+        if (logCandidateDiagnostics)
+            LogCandidateSelectionDecision(bestCandidate.index, forcedCandidateIndex);
+
+        ApplyFilteredWorldPose(
+            bestCandidate.tagWorldPosition,
+            bestCandidate.cubeWorldRotation,
+            measurementDecision.confidence,
+            updatePosition: true,
+            updateRotation: true);
         _hasTrackedTagWorldPose = true;
-        _lastAcceptedTagWorldPosition = bestTagPosition;
-        _lastAcceptedTagWorldRotation = bestCubeRotation;
-        _lastAcceptedWorldNormal = bestWorldNormal;
+        _lastAcceptedTagWorldPosition = bestCandidate.tagWorldPosition;
+        _lastAcceptedTagWorldRotation = bestCandidate.cubeWorldRotation;
+        _lastAcceptedWorldNormal = bestCandidate.worldNormal;
         _hasLastAcceptedMeasurement = true;
-        LogPoseMeasurementValidation(bestCandidateIndex, bestWorldNormal, bestQuality, measurementDecision);
+        LogPoseMeasurementValidation(bestCandidate.index, bestCandidate.worldNormal, bestCandidate.quality, measurementDecision, rotationHeld: false, "reliable image evidence and ARCore world-pose consistency");
         Debug.Log(
-            $"[DJIAprilTag] Unity selected raw OpenCV PnP candidate={bestCandidateIndex} " +
+            $"[DJIAprilTag] Unity selected raw OpenCV PnP candidate={bestCandidate.index} " +
             $"mode={poseCandidateDiagnosticMode} score={bestScore:F4} " +
-            $"reason={(forcedCandidateIndex >= 0 ? "forced diagnostic selection with continuity and temporal filtering" : "lowest reprojection RMS, followed by outlier gating and temporal filtering")}.");
+            $"reason={(forcedCandidateIndex >= 0 ? "forced diagnostic selection" : "lowest reprojection RMS with a non-ambiguous planar pair")}.");
         return true;
     }
 
-    private void ApplyFilteredWorldPose(Vector3 rawTagWorldPosition, Quaternion rawCubeWorldRotation, float measurementConfidence)
+    private void ApplyFilteredWorldPose(
+        Vector3 rawTagWorldPosition,
+        Quaternion rawCubeWorldRotation,
+        float measurementConfidence,
+        bool updatePosition,
+        bool updateRotation)
     {
         var now = Time.unscaledTime;
         if (!_hasTrackedTagWorldPose || float.IsNegativeInfinity(_lastPoseFilterTime))
         {
-            _trackedTagWorldPosition = rawTagWorldPosition;
-            _trackedTagWorldRotation = rawCubeWorldRotation;
+            if (updatePosition)
+                _trackedTagWorldPosition = rawTagWorldPosition;
+            if (updateRotation)
+                _trackedTagWorldRotation = rawCubeWorldRotation;
         }
         else
         {
@@ -1134,8 +1238,10 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             var positionAlpha = (1f - Mathf.Exp(-elapsedSeconds / PositionFilterTimeConstantSeconds)) * confidence;
             var rotationAlpha = (1f - Mathf.Exp(-elapsedSeconds / RotationFilterTimeConstantSeconds)) * confidence;
 
-            _trackedTagWorldPosition = Vector3.Lerp(_trackedTagWorldPosition, rawTagWorldPosition, positionAlpha);
-            _trackedTagWorldRotation = Quaternion.Slerp(_trackedTagWorldRotation, rawCubeWorldRotation, rotationAlpha);
+            if (updatePosition)
+                _trackedTagWorldPosition = Vector3.Lerp(_trackedTagWorldPosition, rawTagWorldPosition, positionAlpha);
+            if (updateRotation)
+                _trackedTagWorldRotation = Quaternion.Slerp(_trackedTagWorldRotation, rawCubeWorldRotation, rotationAlpha);
         }
 
         // The cube local +Y is the marker normal. Recompute its center from the
@@ -1172,17 +1278,75 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         return true;
     }
 
+    private PlanarPoseAmbiguity GetPlanarPoseAmbiguity()
+    {
+        if (!_worldPoseCandidateAvailable[0] || !_worldPoseCandidateAvailable[1])
+            return default;
+
+        var candidate0 = _worldPoseCandidates[0];
+        var candidate1 = _worldPoseCandidates[1];
+        var rmsDelta = Mathf.Abs(candidate0.quality.reprojectionRms - candidate1.quality.reprojectionRms);
+        var relativeRmsDelta = rmsDelta / Mathf.Max(Mathf.Min(candidate0.quality.reprojectionRms, candidate1.quality.reprojectionRms), 0.0001f);
+        var normalSeparationDegrees = Vector3.Angle(candidate0.worldNormal, candidate1.worldNormal);
+        var rotationSeparationDegrees = Quaternion.Angle(candidate0.cubeWorldRotation, candidate1.cubeWorldRotation);
+        var candidate0DeltaFromReliableDegrees = _hasLastAcceptedMeasurement
+            ? Quaternion.Angle(candidate0.cubeWorldRotation, _lastAcceptedTagWorldRotation)
+            : float.NaN;
+        var candidate1DeltaFromReliableDegrees = _hasLastAcceptedMeasurement
+            ? Quaternion.Angle(candidate1.cubeWorldRotation, _lastAcceptedTagWorldRotation)
+            : float.NaN;
+        var nearlyEqualImageEvidence = rmsDelta <= AmbiguousPlanarRmsDeltaPixels ||
+                                       relativeRmsDelta <= AmbiguousPlanarRelativeRmsDelta;
+        var isAmbiguous = nearlyEqualImageEvidence && normalSeparationDegrees >= AmbiguousPlanarNormalSeparationDegrees;
+        return new PlanarPoseAmbiguity(
+            isAmbiguous,
+            candidate0.quality.reprojectionRms,
+            candidate1.quality.reprojectionRms,
+            rmsDelta,
+            relativeRmsDelta,
+            normalSeparationDegrees,
+            rotationSeparationDegrees,
+            candidate0DeltaFromReliableDegrees,
+            candidate1DeltaFromReliableDegrees);
+    }
+
+    private WorldPoseCandidate SelectCandidateClosestToReliableRotation()
+    {
+        var candidate0 = _worldPoseCandidates[0];
+        var candidate1 = _worldPoseCandidates[1];
+        var candidate0Delta = Quaternion.Angle(candidate0.cubeWorldRotation, _lastAcceptedTagWorldRotation);
+        var candidate1Delta = Quaternion.Angle(candidate1.cubeWorldRotation, _lastAcceptedTagWorldRotation);
+        if (!Mathf.Approximately(candidate0Delta, candidate1Delta))
+            return candidate0Delta < candidate1Delta ? candidate0 : candidate1;
+
+        return candidate0.quality.reprojectionRms <= candidate1.quality.reprojectionRms ? candidate0 : candidate1;
+    }
+
+    private static void LogPlanarPoseAmbiguity(
+        PlanarPoseAmbiguity ambiguity,
+        bool rotationHeld,
+        int selectedCandidate,
+        string selectionReason)
+    {
+        Debug.Log(
+            $"[DJIAprilTag] AMBIGUOUS_PLANAR_POSE rms0={ambiguity.rms0:F3}px rms1={ambiguity.rms1:F3}px " +
+            $"rmsDelta={ambiguity.rmsDelta:F3}px relativeRmsDelta={ambiguity.relativeRmsDelta:F3} " +
+            $"candidateNormalSeparation={ambiguity.normalSeparationDegrees:F2}deg " +
+            $"candidateRotationSeparation={ambiguity.rotationSeparationDegrees:F2}deg " +
+            $"candidate0DeltaFromReliable={ambiguity.candidate0DeltaFromReliableDegrees:F2}deg " +
+            $"candidate1DeltaFromReliable={ambiguity.candidate1DeltaFromReliableDegrees:F2}deg " +
+            $"rotationHeld={rotationHeld} selectedCandidate={selectedCandidate} selectionReason={selectionReason}.");
+    }
+
     private PoseMeasurementDecision EvaluateMeasurement(
         Vector3 rawTagWorldPosition,
         Quaternion rawCubeWorldRotation,
         Vector3 rawWorldNormal,
-        PoseMeasurementQuality quality,
-        Pose currentCameraPose)
+        PoseMeasurementQuality quality)
     {
         var reprojectionQuality = Mathf.InverseLerp(MaximumAcceptedReprojectionRmsPixels, 1f, quality.reprojectionRms);
         var cornerQuality = Mathf.InverseLerp(MaximumAcceptedCornerResidualPixels, 1f, quality.maximumCornerResidual);
         var pixelSizeQuality = Mathf.InverseLerp(MinimumAcceptedTagPixelSize, 180f, quality.tagPixelSize);
-        var frontalQuality = 1f - Mathf.InverseLerp(NearFrontoParallelCosine, 0.999f, quality.frontoParallelCosine);
         var normalJumpDegrees = 0f;
         var positionJumpMeters = 0f;
         var temporalQuality = 1f;
@@ -1194,18 +1358,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                 Mathf.InverseLerp(35f, 0f, normalJumpDegrees),
                 Mathf.InverseLerp(0.12f, 0f, positionJumpMeters));
 
-            // A fixed world tag becomes a camera-relative prediction through
-            // the current ARCore pose; no hand-eye correction is introduced.
-            var predictedCameraNormal = Quaternion.Inverse(currentCameraPose.rotation) * _lastAcceptedWorldNormal;
-            var measuredCameraNormal = Quaternion.Inverse(currentCameraPose.rotation) * rawWorldNormal;
-            var arCorePriorNormalError = Vector3.Angle(predictedCameraNormal, measuredCameraNormal);
-            temporalQuality = Mathf.Min(temporalQuality, Mathf.InverseLerp(35f, 0f, arCorePriorNormalError));
         }
 
-        var confidence = 0.30f * reprojectionQuality +
-                         0.25f * cornerQuality +
+        var confidence = 0.35f * reprojectionQuality +
+                         0.30f * cornerQuality +
                          0.20f * pixelSizeQuality +
-                         0.10f * frontalQuality +
                          0.15f * temporalQuality;
         if (quality.maximumCornerResidual > MaximumAcceptedCornerResidualPixels)
         {
@@ -1217,13 +1374,9 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             return new PoseMeasurementDecision(false, confidence, normalJumpDegrees, positionJumpMeters, "tag is too small in the CPU image");
         }
 
-        var nearFrontoParallel = quality.frontoParallelCosine >= NearFrontoParallelCosine;
-        var weakAndInconsistent = confidence < WeakMeasurementConfidence &&
-                                  (normalJumpDegrees > MaximumWeakMeasurementNormalJumpDegrees ||
-                                   positionJumpMeters > MaximumWeakMeasurementPositionJumpMeters);
-        if (_hasLastAcceptedMeasurement && nearFrontoParallel && weakAndInconsistent)
+        if (_hasLastAcceptedMeasurement && positionJumpMeters > MaximumContinuousPositionDeltaMeters)
         {
-            return new PoseMeasurementDecision(false, confidence, normalJumpDegrees, positionJumpMeters, "near-fronto-parallel low-confidence pose conflicts with ARCore world-pose prior");
+            return new PoseMeasurementDecision(false, confidence, normalJumpDegrees, positionJumpMeters, "position conflicts with the ARCore world-pose prior");
         }
 
         return new PoseMeasurementDecision(true, confidence, normalJumpDegrees, positionJumpMeters, "accepted");
@@ -1241,7 +1394,9 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         int candidateIndex,
         Vector3 rawWorldNormal,
         PoseMeasurementQuality quality,
-        PoseMeasurementDecision decision)
+        PoseMeasurementDecision decision,
+        bool rotationHeld,
+        string selectionReason)
     {
         var filteredWorldNormal = _hasTrackedTagWorldPose
             ? _trackedTagWorldRotation * Vector3.up
@@ -1253,7 +1408,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             $"reprojectionRms={quality.reprojectionRms:F3}px maxCornerResidual={quality.maximumCornerResidual:F3}px " +
             $"tagPixelSize={quality.tagPixelSize:F2}px frontoParallelCosine={quality.frontoParallelCosine:F4} " +
             $"rawWorldNormal={rawWorldNormal.ToString("F4")} filteredWorldNormal={filteredWorldNormal.ToString("F4")} " +
-            $"angleFromLastAcceptedNormal={decision.normalJumpDegrees:F2}deg positionJump={decision.positionJumpMeters:F4}m.");
+            $"angleFromLastAcceptedNormal={decision.normalJumpDegrees:F2}deg positionJump={decision.positionJumpMeters:F4}m " +
+            $"rotationHeld={rotationHeld} selectionReason={selectionReason}.");
     }
 
     private void LogRawEstimatorComparison(CameraFrameContext frameContext)
@@ -2371,27 +2527,6 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         // remains on the marker plane. Its local +Z follows the marker's up axis.
         cubeCameraRotation = Quaternion.LookRotation(markerUp, outwardNormal);
         return IsFinite(outwardNormal);
-    }
-
-    private bool IsContinuousPose(Vector3 tagWorldPosition, Quaternion cubeWorldRotation)
-    {
-        return Vector3.Distance(tagWorldPosition, _trackedTagWorldPosition) <= MaximumContinuousPositionDeltaMeters &&
-               Quaternion.Angle(cubeWorldRotation, _trackedTagWorldRotation) <= MaximumContinuousRotationDeltaDegrees;
-    }
-
-    private void TrackPendingPose(Vector3 tagWorldPosition, Quaternion cubeWorldRotation)
-    {
-        if (_pendingPoseFrames > 0 &&
-            Vector3.Distance(tagWorldPosition, _pendingTagWorldPosition) <= PendingPosePositionToleranceMeters &&
-            Quaternion.Angle(cubeWorldRotation, _pendingTagWorldRotation) <= PendingPoseRotationToleranceDegrees)
-        {
-            ++_pendingPoseFrames;
-            return;
-        }
-
-        _pendingTagWorldPosition = tagWorldPosition;
-        _pendingTagWorldRotation = cubeWorldRotation;
-        _pendingPoseFrames = 1;
     }
 
     private void EnsurePreviewCube()
