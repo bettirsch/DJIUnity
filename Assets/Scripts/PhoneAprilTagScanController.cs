@@ -52,6 +52,9 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float MinimumFilterConfidence = 0.18f;
     private const float DiagnosticLogIntervalSeconds = 0.5f;
     private const float StationaryCameraAngularSpeedDegreesPerSecond = 2f;
+    private const int StationaryBaselineConfirmationFrames = 4;
+    private const string ExistingOpenCvToUnityBasisName = "B[x,-y,z]";
+    private static readonly CameraFrameBasisCandidate[] CameraFrameBasisCandidates = CreateCameraFrameBasisCandidates();
 
     [SerializeField] private ARCameraManager cameraManager;
     [SerializeField] [Min(0.01f)] private float detectionIntervalSeconds = 0.03f;
@@ -110,6 +113,14 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private Vector3 _openCvRawWorldNormalReference;
     private bool _hasOfficialRawWorldNormalReference;
     private Vector3 _officialRawWorldNormalReference;
+    private bool _hasOpenCvCameraNormalBaseline;
+    private Vector3 _openCvCameraNormalBaselineWorld;
+    private int _openCvCameraNormalStationaryFrames;
+    private readonly CameraFrameBasisDiagnostic[] _openCvCameraFrameBasisDiagnostics = CreateCameraFrameBasisDiagnostics();
+    private bool _hasOfficialCameraNormalBaseline;
+    private Vector3 _officialCameraNormalBaselineWorld;
+    private int _officialCameraNormalStationaryFrames;
+    private readonly CameraFrameBasisDiagnostic[] _officialCameraFrameBasisDiagnostics = CreateCameraFrameBasisDiagnostics();
 
     private readonly struct CameraFrameContext
     {
@@ -123,6 +134,101 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         public Pose cameraPose { get; }
         public long? timestampNs { get; }
         public Matrix4x4? displayMatrix { get; }
+    }
+
+    private sealed class CameraFrameBasisCandidate
+    {
+        public CameraFrameBasisCandidate(int outputXAxis, int outputYAxis, int outputZAxis, int outputXSign, int outputYSign, int outputZSign)
+        {
+            this.outputXAxis = outputXAxis;
+            this.outputYAxis = outputYAxis;
+            this.outputZAxis = outputZAxis;
+            this.outputXSign = outputXSign;
+            this.outputYSign = outputYSign;
+            this.outputZSign = outputZSign;
+            name = $"B[{FormatAxis(outputXAxis, outputXSign)},{FormatAxis(outputYAxis, outputYSign)},{FormatAxis(outputZAxis, outputZSign)}]";
+        }
+
+        public string name { get; }
+        private int outputXAxis { get; }
+        private int outputYAxis { get; }
+        private int outputZAxis { get; }
+        private int outputXSign { get; }
+        private int outputYSign { get; }
+        private int outputZSign { get; }
+
+        public Vector3 Convert(Vector3 vector)
+        {
+            return new Vector3(
+                outputXSign * GetAxis(vector, outputXAxis),
+                outputYSign * GetAxis(vector, outputYAxis),
+                outputZSign * GetAxis(vector, outputZAxis));
+        }
+
+        private static float GetAxis(Vector3 vector, int axis)
+        {
+            return axis switch
+            {
+                0 => vector.x,
+                1 => vector.y,
+                _ => vector.z
+            };
+        }
+
+        private static string FormatAxis(int axis, int sign)
+        {
+            var axisName = axis switch
+            {
+                0 => "x",
+                1 => "y",
+                _ => "z"
+            };
+            return sign < 0 ? $"-{axisName}" : axisName;
+        }
+    }
+
+    private sealed class CameraFrameBasisDiagnostic
+    {
+        public CameraFrameBasisDiagnostic(CameraFrameBasisCandidate candidate)
+        {
+            this.candidate = candidate;
+        }
+
+        public CameraFrameBasisCandidate candidate { get; }
+        public bool hasBaseline { get; private set; }
+        public int sampleCount { get; private set; }
+        public float rootMeanSquareDriftDegrees => sampleCount == 0
+            ? float.PositiveInfinity
+            : Mathf.Sqrt(sumSquaredDriftDegrees / sampleCount);
+
+        private Vector3 _baselineWorldNormal;
+        private float sumSquaredDriftDegrees;
+
+        public void CaptureBaseline(Pose cameraPose, Vector3 rawCameraNormal)
+        {
+            _baselineWorldNormal = (cameraPose.rotation * candidate.Convert(rawCameraNormal)).normalized;
+            sumSquaredDriftDegrees = 0f;
+            sampleCount = 0;
+            hasBaseline = true;
+        }
+
+        public void AddSample(Pose cameraPose, Vector3 rawCameraNormal)
+        {
+            if (!hasBaseline)
+                return;
+
+            var worldNormal = (cameraPose.rotation * candidate.Convert(rawCameraNormal)).normalized;
+            var driftDegrees = Vector3.Angle(_baselineWorldNormal, worldNormal);
+            sumSquaredDriftDegrees += driftDegrees * driftDegrees;
+            ++sampleCount;
+        }
+
+        public void Reset()
+        {
+            hasBaseline = false;
+            sampleCount = 0;
+            sumSquaredDriftDegrees = 0f;
+        }
     }
 
     private void Awake()
@@ -733,7 +839,29 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _lastRawEstimatorDiagnosticCameraPose = frameContext.cameraPose;
         _lastRawEstimatorDiagnosticCameraPoseTime = now;
         _hasRawEstimatorDiagnosticCameraPose = true;
-        if (now - _lastRawEstimatorComparisonLogTime < DiagnosticLogIntervalSeconds)
+
+        var shouldLogComparison = now - _lastRawEstimatorComparisonLogTime >= DiagnosticLogIntervalSeconds;
+        UpdateCameraFrameBasisValidation(
+            "OpenCV/IPPE",
+            _nativePoseCandidates,
+            frameContext,
+            cameraAngularSpeed,
+            ref _hasOpenCvCameraNormalBaseline,
+            ref _openCvCameraNormalBaselineWorld,
+            ref _openCvCameraNormalStationaryFrames,
+            _openCvCameraFrameBasisDiagnostics,
+            shouldLogComparison);
+        UpdateCameraFrameBasisValidation(
+            "OfficialAprilTag",
+            _nativeOfficialPoseCandidates,
+            frameContext,
+            cameraAngularSpeed,
+            ref _hasOfficialCameraNormalBaseline,
+            ref _officialCameraNormalBaselineWorld,
+            ref _officialCameraNormalStationaryFrames,
+            _officialCameraFrameBasisDiagnostics,
+            shouldLogComparison);
+        if (!shouldLogComparison)
             return;
 
         _lastRawEstimatorComparisonLogTime = now;
@@ -755,6 +883,167 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             cameraAngularSpeed,
             ref _hasOfficialRawWorldNormalReference,
             ref _officialRawWorldNormalReference);
+    }
+
+    private static void UpdateCameraFrameBasisValidation(
+        string estimatorName,
+        float[] poseCandidates,
+        CameraFrameContext frameContext,
+        float cameraAngularSpeed,
+        ref bool hasStationaryBaseline,
+        ref Vector3 stationaryBaselineWorldNormal,
+        ref int consecutiveStationaryFrames,
+        CameraFrameBasisDiagnostic[] basisDiagnostics,
+        bool shouldLog)
+    {
+        var selectedCandidateIndex = GetLowestErrorCandidateIndex(poseCandidates);
+        if (selectedCandidateIndex < 0)
+            return;
+
+        var offset = selectedCandidateIndex * PoseCandidateStride;
+        var rawCameraNormal = GetCameraSpaceNormal(poseCandidates, offset);
+        if (!IsFinite(rawCameraNormal) || rawCameraNormal.sqrMagnitude < 0.9f)
+            return;
+
+        rawCameraNormal.Normalize();
+        var convertedUnityCameraNormal = ConvertOpenCvNormalToUnityCamera(rawCameraNormal);
+        if (!hasStationaryBaseline)
+        {
+            consecutiveStationaryFrames = cameraAngularSpeed <= StationaryCameraAngularSpeedDegreesPerSecond
+                ? consecutiveStationaryFrames + 1
+                : 0;
+            if (consecutiveStationaryFrames >= StationaryBaselineConfirmationFrames)
+            {
+                stationaryBaselineWorldNormal = (frameContext.cameraPose.rotation * convertedUnityCameraNormal).normalized;
+                hasStationaryBaseline = true;
+                foreach (var diagnostic in basisDiagnostics)
+                    diagnostic.CaptureBaseline(frameContext.cameraPose, rawCameraNormal);
+
+                Debug.Log(
+                    $"[DJIAprilTag] Camera-frame baseline established estimator={estimatorName} " +
+                    $"worldNormal={stationaryBaselineWorldNormal.ToString("F5")} " +
+                    $"after {consecutiveStationaryFrames} stationary frames.");
+            }
+        }
+
+        if (!hasStationaryBaseline)
+        {
+            if (shouldLog)
+            {
+                Debug.Log(
+                    $"[DJIAprilTag] Camera-frame validation estimator={estimatorName} waiting for stationary baseline " +
+                    $"frames={consecutiveStationaryFrames}/{StationaryBaselineConfirmationFrames} " +
+                    $"cameraAngularSpeed={cameraAngularSpeed:F2}deg/s.");
+            }
+            return;
+        }
+
+        foreach (var diagnostic in basisDiagnostics)
+            diagnostic.AddSample(frameContext.cameraPose, rawCameraNormal);
+
+        if (!shouldLog)
+            return;
+
+        var expectedUnityCameraNormal = (Quaternion.Inverse(frameContext.cameraPose.rotation) * stationaryBaselineWorldNormal).normalized;
+        var resultingWorldNormal = (frameContext.cameraPose.rotation * convertedUnityCameraNormal).normalized;
+        var measuredVsExpectedDegrees = Vector3.Angle(convertedUnityCameraNormal, expectedUnityCameraNormal);
+        var worldNormalDriftDegrees = Vector3.Angle(stationaryBaselineWorldNormal, resultingWorldNormal);
+        var bestBasis = GetBestCameraFrameBasisDiagnostic(basisDiagnostics);
+        var existingBasis = GetCameraFrameBasisDiagnostic(basisDiagnostics, ExistingOpenCvToUnityBasisName);
+        var equivalentBestBasisCount = CountEquivalentBestCameraFrameBases(basisDiagnostics, bestBasis.rootMeanSquareDriftDegrees);
+        Debug.Log(
+            $"[DJIAprilTag] Camera-frame validation estimator={estimatorName} selectedCandidate={selectedCandidateIndex} " +
+            $"currentARCameraRotation={FormatQuaternion(frameContext.cameraPose.rotation)} " +
+            $"rawCvNormal={rawCameraNormal.ToString("F5")} " +
+            $"convertedUnityCameraNormal={convertedUnityCameraNormal.ToString("F5")} " +
+            $"expectedUnityCameraNormal={expectedUnityCameraNormal.ToString("F5")} " +
+            $"measuredVsExpected={measuredVsExpectedDegrees:F2}deg " +
+            $"resultingWorldNormal={resultingWorldNormal.ToString("F5")} " +
+            $"worldNormalDrift={worldNormalDriftDegrees:F2}deg " +
+            $"basisSearchBest={bestBasis.candidate.name} basisSearchRms={bestBasis.rootMeanSquareDriftDegrees:F2}deg " +
+            $"basisSearchExisting={ExistingOpenCvToUnityBasisName} basisSearchExistingRms={existingBasis.rootMeanSquareDriftDegrees:F2}deg " +
+            $"basisSearchEquivalentBestCount={equivalentBestBasisCount} basisSearchSamples={bestBasis.sampleCount}.");
+    }
+
+    private static CameraFrameBasisCandidate[] CreateCameraFrameBasisCandidates()
+    {
+        var axisPermutations = new[,]
+        {
+            { 0, 1, 2 }, { 0, 2, 1 }, { 1, 0, 2 },
+            { 1, 2, 0 }, { 2, 0, 1 }, { 2, 1, 0 }
+        };
+        var candidates = new CameraFrameBasisCandidate[48];
+        var index = 0;
+        for (var permutationIndex = 0; permutationIndex < axisPermutations.GetLength(0); ++permutationIndex)
+        {
+            for (var signMask = 0; signMask < 8; ++signMask)
+            {
+                candidates[index++] = new CameraFrameBasisCandidate(
+                    axisPermutations[permutationIndex, 0],
+                    axisPermutations[permutationIndex, 1],
+                    axisPermutations[permutationIndex, 2],
+                    (signMask & 1) == 0 ? -1 : 1,
+                    (signMask & 2) == 0 ? -1 : 1,
+                    (signMask & 4) == 0 ? -1 : 1);
+            }
+        }
+        return candidates;
+    }
+
+    private static CameraFrameBasisDiagnostic[] CreateCameraFrameBasisDiagnostics()
+    {
+        var diagnostics = new CameraFrameBasisDiagnostic[CameraFrameBasisCandidates.Length];
+        for (var index = 0; index < diagnostics.Length; ++index)
+            diagnostics[index] = new CameraFrameBasisDiagnostic(CameraFrameBasisCandidates[index]);
+        return diagnostics;
+    }
+
+    private static CameraFrameBasisDiagnostic GetBestCameraFrameBasisDiagnostic(CameraFrameBasisDiagnostic[] diagnostics)
+    {
+        var best = diagnostics[0];
+        for (var index = 1; index < diagnostics.Length; ++index)
+        {
+            if (diagnostics[index].rootMeanSquareDriftDegrees < best.rootMeanSquareDriftDegrees)
+                best = diagnostics[index];
+        }
+        return best;
+    }
+
+    private static CameraFrameBasisDiagnostic GetCameraFrameBasisDiagnostic(
+        CameraFrameBasisDiagnostic[] diagnostics,
+        string basisName)
+    {
+        foreach (var diagnostic in diagnostics)
+        {
+            if (diagnostic.candidate.name == basisName)
+                return diagnostic;
+        }
+
+        throw new InvalidOperationException($"The expected camera-frame basis {basisName} is not registered.");
+    }
+
+    private static int CountEquivalentBestCameraFrameBases(
+        CameraFrameBasisDiagnostic[] diagnostics,
+        float bestRootMeanSquareDriftDegrees)
+    {
+        var equivalentCount = 0;
+        foreach (var diagnostic in diagnostics)
+        {
+            if (Mathf.Abs(diagnostic.rootMeanSquareDriftDegrees - bestRootMeanSquareDriftDegrees) <= 0.01f)
+                ++equivalentCount;
+        }
+        return equivalentCount;
+    }
+
+    private static Vector3 ConvertOpenCvNormalToUnityCamera(Vector3 rawCameraNormal)
+    {
+        // Existing S = diag(1, -1, 1) OpenCV-to-Unity camera-basis conversion.
+        return new Vector3(rawCameraNormal.x, -rawCameraNormal.y, rawCameraNormal.z).normalized;
+    }
+
+    private static string FormatQuaternion(Quaternion rotation)
+    {
+        return $"({rotation.x:F5},{rotation.y:F5},{rotation.z:F5},{rotation.w:F5})";
     }
 
     private void LogRawEstimatorCandidates(
@@ -953,6 +1242,14 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _hasOpenCvRawWorldNormalReference = false;
         _hasOfficialRawWorldNormalReference = false;
         _hasRawEstimatorDiagnosticCameraPose = false;
+        _hasOpenCvCameraNormalBaseline = false;
+        _openCvCameraNormalStationaryFrames = 0;
+        _hasOfficialCameraNormalBaseline = false;
+        _officialCameraNormalStationaryFrames = 0;
+        foreach (var diagnostic in _openCvCameraFrameBasisDiagnostics)
+            diagnostic.Reset();
+        foreach (var diagnostic in _officialCameraFrameBasisDiagnostics)
+            diagnostic.Reset();
     }
 
     private void RecordCandidateNormalBaselines(
