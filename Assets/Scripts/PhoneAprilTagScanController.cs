@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using Unity.Collections;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -54,6 +55,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float StationaryCameraAngularSpeedDegreesPerSecond = 2f;
     private const int StationaryBaselineConfirmationFrames = 4;
     private const string ExistingOpenCvToUnityBasisName = "B[x,-y,z]";
+    private const int MaximumHandEyeSamplesPerCandidate = 80;
+    private const int MinimumHandEyeCalibrationSamples = 12;
+    private const int MinimumHandEyeValidationSamples = 3;
+    private const float MinimumHandEyeSampleRotationDegrees = 3f;
+    private const float MinimumHandEyePairRotationDegrees = 5f;
     private static readonly CameraFrameBasisCandidate[] CameraFrameBasisCandidates = CreateCameraFrameBasisCandidates();
 
     [SerializeField] private ARCameraManager cameraManager;
@@ -121,6 +127,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private Vector3 _officialCameraNormalBaselineWorld;
     private int _officialCameraNormalStationaryFrames;
     private readonly CameraFrameBasisDiagnostic[] _officialCameraFrameBasisDiagnostics = CreateCameraFrameBasisDiagnostics();
+    private readonly HandEyeCalibrationDiagnostic[] _openCvHandEyeDiagnostics =
+    {
+        new(0),
+        new(1)
+    };
 
     private readonly struct CameraFrameContext
     {
@@ -229,6 +240,71 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             sampleCount = 0;
             sumSquaredDriftDegrees = 0f;
         }
+    }
+
+    private readonly struct HandEyeRotationSample
+    {
+        public HandEyeRotationSample(Quaternion cameraWorldRotation, Quaternion canonicalTagRotation)
+        {
+            this.cameraWorldRotation = cameraWorldRotation;
+            this.canonicalTagRotation = canonicalTagRotation;
+        }
+
+        public Quaternion cameraWorldRotation { get; }
+        public Quaternion canonicalTagRotation { get; }
+    }
+
+    private sealed class HandEyeCalibrationDiagnostic
+    {
+        public HandEyeCalibrationDiagnostic(int candidateIndex)
+        {
+            this.candidateIndex = candidateIndex;
+        }
+
+        public int candidateIndex { get; }
+        public readonly List<HandEyeRotationSample> samples = new();
+
+        private bool _hasLastSample;
+        private Quaternion _lastCameraWorldRotation;
+
+        public void TryAddSample(Quaternion cameraWorldRotation, Quaternion canonicalTagRotation)
+        {
+            if (samples.Count >= MaximumHandEyeSamplesPerCandidate)
+                return;
+
+            if (_hasLastSample &&
+                Quaternion.Angle(_lastCameraWorldRotation, cameraWorldRotation) < MinimumHandEyeSampleRotationDegrees)
+            {
+                return;
+            }
+
+            samples.Add(new HandEyeRotationSample(cameraWorldRotation, canonicalTagRotation));
+            _lastCameraWorldRotation = cameraWorldRotation;
+            _hasLastSample = true;
+        }
+
+        public void Reset()
+        {
+            samples.Clear();
+            _hasLastSample = false;
+            _lastCameraWorldRotation = Quaternion.identity;
+        }
+    }
+
+    private readonly struct HandEyeEvaluation
+    {
+        public HandEyeEvaluation(float rotationRmsDegrees, float maximumRotationErrorDegrees, float normalRmsDegrees, float maximumNormalErrorDegrees)
+        {
+            this.rotationRmsDegrees = rotationRmsDegrees;
+            this.maximumRotationErrorDegrees = maximumRotationErrorDegrees;
+            this.normalRmsDegrees = normalRmsDegrees;
+            this.maximumNormalErrorDegrees = maximumNormalErrorDegrees;
+        }
+
+        public float rotationRmsDegrees { get; }
+        public float maximumRotationErrorDegrees { get; }
+        public float normalRmsDegrees { get; }
+        public float maximumNormalErrorDegrees { get; }
     }
 
     private void Awake()
@@ -841,6 +917,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _hasRawEstimatorDiagnosticCameraPose = true;
 
         var shouldLogComparison = now - _lastRawEstimatorComparisonLogTime >= DiagnosticLogIntervalSeconds;
+        UpdateHandEyeCalibrationDiagnostics(frameContext, shouldLogComparison);
         UpdateCameraFrameBasisValidation(
             "OpenCV/IPPE",
             _nativePoseCandidates,
@@ -1046,6 +1123,380 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         return $"({rotation.x:F5},{rotation.y:F5},{rotation.z:F5},{rotation.w:F5})";
     }
 
+    private void UpdateHandEyeCalibrationDiagnostics(CameraFrameContext frameContext, bool shouldLog)
+    {
+        for (var candidateIndex = 0; candidateIndex < MaximumPoseCandidates; ++candidateIndex)
+        {
+            var offset = candidateIndex * PoseCandidateStride;
+            if (!HasValidPoseCandidateError(_nativePoseCandidates, offset) ||
+                !TryGetCanonicalOpenCvTagRotation(_nativePoseCandidates, offset, out var canonicalTagRotation))
+            {
+                continue;
+            }
+
+            _openCvHandEyeDiagnostics[candidateIndex].TryAddSample(
+                frameContext.cameraPose.rotation,
+                canonicalTagRotation);
+        }
+
+        if (!shouldLog)
+            return;
+
+        foreach (var diagnostic in _openCvHandEyeDiagnostics)
+            LogHandEyeCalibrationDiagnostic(diagnostic);
+    }
+
+    private static bool TryGetCanonicalOpenCvTagRotation(float[] poseCandidates, int offset, out Quaternion rotation)
+    {
+        rotation = Quaternion.identity;
+        if (poseCandidates == null || offset < 0 || offset + PoseCandidateStride > poseCandidates.Length)
+            return false;
+
+        // Convert both the OpenCV optical frame and the fixed tag frame with
+        // S = diag(1, -1, 1), leaving a proper rotation for the AX=XB solve.
+        var right = new Vector3(
+            poseCandidates[offset + 3],
+            -poseCandidates[offset + 6],
+            poseCandidates[offset + 9]);
+        var up = new Vector3(
+            -poseCandidates[offset + 4],
+            poseCandidates[offset + 7],
+            -poseCandidates[offset + 10]);
+        var forward = new Vector3(
+            poseCandidates[offset + 5],
+            -poseCandidates[offset + 8],
+            poseCandidates[offset + 11]);
+        if (!IsFinite(right) || !IsFinite(up) || !IsFinite(forward) ||
+            right.sqrMagnitude < 0.9f || up.sqrMagnitude < 0.9f || forward.sqrMagnitude < 0.9f)
+        {
+            return false;
+        }
+
+        right.Normalize();
+        up = Vector3.ProjectOnPlane(up, right).normalized;
+        var orthonormalForward = Vector3.Cross(right, up).normalized;
+        forward.Normalize();
+        if (up.sqrMagnitude < 0.9f || orthonormalForward.sqrMagnitude < 0.9f ||
+            Vector3.Dot(orthonormalForward, forward) < 0.95f)
+        {
+            return false;
+        }
+
+        rotation = Quaternion.LookRotation(orthonormalForward, up);
+        return IsFinite(rotation);
+    }
+
+    private static void LogHandEyeCalibrationDiagnostic(HandEyeCalibrationDiagnostic diagnostic)
+    {
+        SplitHandEyeSamples(diagnostic.samples, out var calibrationSamples, out var validationSamples);
+        if (calibrationSamples.Count < MinimumHandEyeCalibrationSamples ||
+            validationSamples.Count < MinimumHandEyeValidationSamples)
+        {
+            Debug.Log(
+                $"[DJIAprilTag] Hand-eye calibration candidate={diagnostic.candidateIndex} " +
+                $"waiting for tilt-sweep samples " +
+                $"total={diagnostic.samples.Count} calibration={calibrationSamples.Count}/{MinimumHandEyeCalibrationSamples} " +
+                $"validation={validationSamples.Count}/{MinimumHandEyeValidationSamples}.");
+            return;
+        }
+
+        if (!TrySolveHandEyeRotation(calibrationSamples, out var basisRotation, out var calibrationRmsDegrees, out var calibrationPairCount))
+        {
+            Debug.LogWarning(
+                $"[DJIAprilTag] Hand-eye calibration candidate={diagnostic.candidateIndex} could not solve AX=XB " +
+                $"from {calibrationSamples.Count} calibration samples.");
+            return;
+        }
+
+        var validationBefore = EvaluateWorldTagRotation(validationSamples, Quaternion.identity);
+        var validationAfter = EvaluateWorldTagRotation(validationSamples, basisRotation);
+        var basisDeterminant = GetRotationDeterminant(basisRotation);
+        var basisOrthonormalityError = GetRotationOrthonormalityError(basisRotation);
+        Debug.Log(
+            $"[DJIAprilTag] Hand-eye calibration candidate={diagnostic.candidateIndex} " +
+            $"B.matrix={FormatRotationMatrix(basisRotation)} B.quaternion={FormatQuaternion(basisRotation)} " +
+            $"B.eulerInspection={FormatEulerAngles(basisRotation)} " +
+            $"B.det={basisDeterminant:F6} B.orthonormalityError={basisOrthonormalityError:E3} " +
+            $"calibrationPairRms={calibrationRmsDegrees:F2}deg calibrationPairs={calibrationPairCount} " +
+            $"validationRotationRms={validationAfter.rotationRmsDegrees:F2}deg " +
+            $"validationMaxRotationError={validationAfter.maximumRotationErrorDegrees:F2}deg " +
+            $"validationNormalDriftBeforeRms={validationBefore.normalRmsDegrees:F2}deg " +
+            $"validationNormalDriftAfterRms={validationAfter.normalRmsDegrees:F2}deg " +
+            $"validationNormalDriftBeforeMax={validationBefore.maximumNormalErrorDegrees:F2}deg " +
+            $"validationNormalDriftAfterMax={validationAfter.maximumNormalErrorDegrees:F2}deg " +
+            $"validationSamples={validationSamples.Count}.");
+    }
+
+    private static void SplitHandEyeSamples(
+        List<HandEyeRotationSample> samples,
+        out List<HandEyeRotationSample> calibrationSamples,
+        out List<HandEyeRotationSample> validationSamples)
+    {
+        calibrationSamples = new List<HandEyeRotationSample>();
+        validationSamples = new List<HandEyeRotationSample>();
+        for (var index = 0; index < samples.Count; ++index)
+        {
+            // Every fifth temporally independent sample is held out. This keeps
+            // both tilt directions represented in calibration and validation.
+            if (index % 5 == 4)
+                validationSamples.Add(samples[index]);
+            else
+                calibrationSamples.Add(samples[index]);
+        }
+    }
+
+    private static bool TrySolveHandEyeRotation(
+        List<HandEyeRotationSample> calibrationSamples,
+        out Quaternion basisRotation,
+        out float calibrationRmsDegrees,
+        out int pairCount)
+    {
+        basisRotation = Quaternion.identity;
+        calibrationRmsDegrees = float.PositiveInfinity;
+        pairCount = 0;
+        var normalEquations = new double[4, 4];
+        for (var first = 0; first < calibrationSamples.Count - 1; ++first)
+        {
+            for (var second = first + 1; second < calibrationSamples.Count; ++second)
+            {
+                var firstSample = calibrationSamples[first];
+                var secondSample = calibrationSamples[second];
+                var cameraMotionDegrees = Quaternion.Angle(firstSample.cameraWorldRotation, secondSample.cameraWorldRotation);
+                if (cameraMotionDegrees < MinimumHandEyePairRotationDegrees)
+                    continue;
+
+                // A * B = B * C, where B maps the canonical OpenCV camera
+                // frame to ARCamera local space after the fixed S reflection.
+                var a = Quaternion.Inverse(secondSample.cameraWorldRotation) * firstSample.cameraWorldRotation;
+                var c = secondSample.canonicalTagRotation * Quaternion.Inverse(firstSample.canonicalTagRotation);
+                AddHandEyeNormalEquation(normalEquations, a, c);
+                ++pairCount;
+            }
+        }
+
+        if (pairCount < 3 || !TryFindSmallestEigenQuaternion(normalEquations, out basisRotation))
+            return false;
+
+        var sumSquaredResidual = 0f;
+        for (var first = 0; first < calibrationSamples.Count - 1; ++first)
+        {
+            for (var second = first + 1; second < calibrationSamples.Count; ++second)
+            {
+                var firstSample = calibrationSamples[first];
+                var secondSample = calibrationSamples[second];
+                if (Quaternion.Angle(firstSample.cameraWorldRotation, secondSample.cameraWorldRotation) < MinimumHandEyePairRotationDegrees)
+                    continue;
+
+                var a = Quaternion.Inverse(secondSample.cameraWorldRotation) * firstSample.cameraWorldRotation;
+                var c = secondSample.canonicalTagRotation * Quaternion.Inverse(firstSample.canonicalTagRotation);
+                var residualDegrees = Quaternion.Angle(a * basisRotation, basisRotation * c);
+                sumSquaredResidual += residualDegrees * residualDegrees;
+            }
+        }
+
+        calibrationRmsDegrees = Mathf.Sqrt(sumSquaredResidual / pairCount);
+        return true;
+    }
+
+    private static void AddHandEyeNormalEquation(double[,] normalEquations, Quaternion a, Quaternion c)
+    {
+        var left = GetQuaternionLeftMultiplicationMatrix(a);
+        var right = GetQuaternionRightMultiplicationMatrix(c);
+        var equation = new double[4, 4];
+        for (var row = 0; row < 4; ++row)
+        {
+            for (var column = 0; column < 4; ++column)
+                equation[row, column] = left[row, column] - right[row, column];
+        }
+
+        for (var row = 0; row < 4; ++row)
+        {
+            for (var column = 0; column < 4; ++column)
+            {
+                var contribution = 0.0;
+                for (var equationRow = 0; equationRow < 4; ++equationRow)
+                    contribution += equation[equationRow, row] * equation[equationRow, column];
+                normalEquations[row, column] += contribution;
+            }
+        }
+    }
+
+    private static double[,] GetQuaternionLeftMultiplicationMatrix(Quaternion value)
+    {
+        return new[,]
+        {
+            { (double)value.w, -value.z, value.y, value.x },
+            { value.z, value.w, -value.x, value.y },
+            { -value.y, value.x, value.w, value.z },
+            { -value.x, -value.y, -value.z, value.w }
+        };
+    }
+
+    private static double[,] GetQuaternionRightMultiplicationMatrix(Quaternion value)
+    {
+        return new[,]
+        {
+            { (double)value.w, value.z, -value.y, value.x },
+            { -value.z, value.w, value.x, value.y },
+            { value.y, -value.x, value.w, value.z },
+            { -value.x, -value.y, -value.z, value.w }
+        };
+    }
+
+    private static bool TryFindSmallestEigenQuaternion(double[,] matrix, out Quaternion quaternion)
+    {
+        quaternion = Quaternion.identity;
+        var values = (double[,])matrix.Clone();
+        var eigenvectors = new double[4, 4];
+        for (var index = 0; index < 4; ++index)
+            eigenvectors[index, index] = 1.0;
+
+        for (var iteration = 0; iteration < 64; ++iteration)
+        {
+            var pivotRow = 0;
+            var pivotColumn = 1;
+            var largestOffDiagonal = 0.0;
+            for (var row = 0; row < 4; ++row)
+            {
+                for (var column = row + 1; column < 4; ++column)
+                {
+                    var magnitude = Math.Abs(values[row, column]);
+                    if (magnitude > largestOffDiagonal)
+                    {
+                        largestOffDiagonal = magnitude;
+                        pivotRow = row;
+                        pivotColumn = column;
+                    }
+                }
+            }
+
+            if (largestOffDiagonal < 1e-10)
+                break;
+
+            var theta = 0.5 * Math.Atan2(
+                2.0 * values[pivotRow, pivotColumn],
+                values[pivotColumn, pivotColumn] - values[pivotRow, pivotRow]);
+            var cosine = Math.Cos(theta);
+            var sine = Math.Sin(theta);
+            var diagonalRow = values[pivotRow, pivotRow];
+            var diagonalColumn = values[pivotColumn, pivotColumn];
+            var offDiagonal = values[pivotRow, pivotColumn];
+            for (var index = 0; index < 4; ++index)
+            {
+                if (index == pivotRow || index == pivotColumn)
+                    continue;
+
+                var rowValue = values[index, pivotRow];
+                var columnValue = values[index, pivotColumn];
+                values[index, pivotRow] = values[pivotRow, index] = cosine * rowValue - sine * columnValue;
+                values[index, pivotColumn] = values[pivotColumn, index] = sine * rowValue + cosine * columnValue;
+            }
+
+            values[pivotRow, pivotRow] = cosine * cosine * diagonalRow - 2.0 * sine * cosine * offDiagonal + sine * sine * diagonalColumn;
+            values[pivotColumn, pivotColumn] = sine * sine * diagonalRow + 2.0 * sine * cosine * offDiagonal + cosine * cosine * diagonalColumn;
+            values[pivotRow, pivotColumn] = values[pivotColumn, pivotRow] = 0.0;
+            for (var row = 0; row < 4; ++row)
+            {
+                var rowValue = eigenvectors[row, pivotRow];
+                var columnValue = eigenvectors[row, pivotColumn];
+                eigenvectors[row, pivotRow] = cosine * rowValue - sine * columnValue;
+                eigenvectors[row, pivotColumn] = sine * rowValue + cosine * columnValue;
+            }
+        }
+
+        var smallestEigenvalueIndex = 0;
+        for (var index = 1; index < 4; ++index)
+        {
+            if (values[index, index] < values[smallestEigenvalueIndex, smallestEigenvalueIndex])
+                smallestEigenvalueIndex = index;
+        }
+
+        quaternion = new Quaternion(
+            (float)eigenvectors[0, smallestEigenvalueIndex],
+            (float)eigenvectors[1, smallestEigenvalueIndex],
+            (float)eigenvectors[2, smallestEigenvalueIndex],
+            (float)eigenvectors[3, smallestEigenvalueIndex]);
+        if (!IsFinite(quaternion) || GetQuaternionLengthSquared(quaternion) < 0.9f)
+            return false;
+
+        quaternion = Quaternion.Normalize(quaternion);
+        return true;
+    }
+
+    private static HandEyeEvaluation EvaluateWorldTagRotation(List<HandEyeRotationSample> samples, Quaternion basisRotation)
+    {
+        var referenceRotation = samples[0].cameraWorldRotation * basisRotation * samples[0].canonicalTagRotation;
+        var referenceNormal = referenceRotation * Vector3.forward;
+        var rotationSumSquared = 0f;
+        var normalSumSquared = 0f;
+        var maximumRotationError = 0f;
+        var maximumNormalError = 0f;
+        foreach (var sample in samples)
+        {
+            var worldTagRotation = sample.cameraWorldRotation * basisRotation * sample.canonicalTagRotation;
+            var rotationError = Quaternion.Angle(referenceRotation, worldTagRotation);
+            var normalError = Vector3.Angle(referenceNormal, worldTagRotation * Vector3.forward);
+            rotationSumSquared += rotationError * rotationError;
+            normalSumSquared += normalError * normalError;
+            maximumRotationError = Mathf.Max(maximumRotationError, rotationError);
+            maximumNormalError = Mathf.Max(maximumNormalError, normalError);
+        }
+
+        return new HandEyeEvaluation(
+            Mathf.Sqrt(rotationSumSquared / samples.Count),
+            maximumRotationError,
+            Mathf.Sqrt(normalSumSquared / samples.Count),
+            maximumNormalError);
+    }
+
+    private static string FormatRotationMatrix(Quaternion rotation)
+    {
+        var right = rotation * Vector3.right;
+        var up = rotation * Vector3.up;
+        var forward = rotation * Vector3.forward;
+        return $"[{right.x:F5},{up.x:F5},{forward.x:F5};" +
+               $"{right.y:F5},{up.y:F5},{forward.y:F5};" +
+               $"{right.z:F5},{up.z:F5},{forward.z:F5}]";
+    }
+
+    private static string FormatEulerAngles(Quaternion rotation)
+    {
+        var euler = rotation.eulerAngles;
+        return $"({ToSignedEulerDegrees(euler.x):F2},{ToSignedEulerDegrees(euler.y):F2},{ToSignedEulerDegrees(euler.z):F2})";
+    }
+
+    private static float ToSignedEulerDegrees(float angle)
+    {
+        return angle > 180f ? angle - 360f : angle;
+    }
+
+    private static float GetRotationDeterminant(Quaternion rotation)
+    {
+        var right = rotation * Vector3.right;
+        var up = rotation * Vector3.up;
+        var forward = rotation * Vector3.forward;
+        return Vector3.Dot(right, Vector3.Cross(up, forward));
+    }
+
+    private static float GetRotationOrthonormalityError(Quaternion rotation)
+    {
+        var right = rotation * Vector3.right;
+        var up = rotation * Vector3.up;
+        var forward = rotation * Vector3.forward;
+        return Mathf.Max(
+            Mathf.Abs(right.sqrMagnitude - 1f),
+            Mathf.Abs(up.sqrMagnitude - 1f),
+            Mathf.Abs(forward.sqrMagnitude - 1f),
+            Mathf.Abs(Vector3.Dot(right, up)),
+            Mathf.Abs(Vector3.Dot(right, forward)),
+            Mathf.Abs(Vector3.Dot(up, forward)));
+    }
+
+    private static float GetQuaternionLengthSquared(Quaternion value)
+    {
+        return value.x * value.x + value.y * value.y + value.z * value.z + value.w * value.w;
+    }
+
     private void LogRawEstimatorCandidates(
         string estimatorName,
         string errorName,
@@ -1249,6 +1700,8 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         foreach (var diagnostic in _openCvCameraFrameBasisDiagnostics)
             diagnostic.Reset();
         foreach (var diagnostic in _officialCameraFrameBasisDiagnostics)
+            diagnostic.Reset();
+        foreach (var diagnostic in _openCvHandEyeDiagnostics)
             diagnostic.Reset();
     }
 
@@ -1543,6 +1996,14 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         return !float.IsNaN(value.x) && !float.IsInfinity(value.x) &&
                !float.IsNaN(value.y) && !float.IsInfinity(value.y) &&
                !float.IsNaN(value.z) && !float.IsInfinity(value.z);
+    }
+
+    private static bool IsFinite(Quaternion value)
+    {
+        return !float.IsNaN(value.x) && !float.IsInfinity(value.x) &&
+               !float.IsNaN(value.y) && !float.IsInfinity(value.y) &&
+               !float.IsNaN(value.z) && !float.IsInfinity(value.z) &&
+               !float.IsNaN(value.w) && !float.IsInfinity(value.w);
     }
 
     private void LoadDroneView()
