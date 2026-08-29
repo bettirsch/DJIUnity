@@ -1,0 +1,10 @@
+{
+  "enabled": false,
+  "cpuImageWidth": 640,
+  "cpuImageHeight": 480,
+  "fx": 0.0,
+  "fy": 0.0,
+  "cx": 0.0,
+  "cy": 0.0,
+  "distortionCoefficients": [0.0, 0.0, 0.0, 0.0, 0.0]
+}

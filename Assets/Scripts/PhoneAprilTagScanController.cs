@@ -23,6 +23,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const string DroneViewSceneName = "DroneView";
     private const string PreviewCubeName = "Phone AprilTag Preview Cube";
     private const string ReferenceImageResourceName = "AprilTagReference";
+    private const string CpuCameraCalibrationResourceName = "AprilTagCpuCameraCalibration";
     private const float ReferenceImageWidthMeters = 0.2f;
     private const float PrintedTagSizeMeters = 0.2f;
     private const float PreviewCubeSizeMeters = 0.14f;
@@ -40,7 +41,11 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float PreviewEdgeLength = 1.04f;
     private const int MaxDetectionImageDimension = 960;
     private const float MarkerLostTimeoutSeconds = 0.2f;
-    private const int PoseCandidateStride = 13;
+    private const int PoseCandidateStride = 16;
+    private const int ReprojectionRmsOffset = 12;
+    private const int MaximumCornerResidualOffset = 13;
+    private const int TagPixelSizeOffset = 14;
+    private const int FrontoParallelCosineOffset = 15;
     private const int MaximumPoseCandidates = 2;
     private const int PoseSwitchConfirmationFrames = 4;
     private const float MaximumContinuousPositionDeltaMeters = 0.08f;
@@ -48,6 +53,12 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private const float PendingPosePositionToleranceMeters = 0.025f;
     private const float PendingPoseRotationToleranceDegrees = 12f;
     private const float MaximumAcceptedReprojectionRmsPixels = 12f;
+    private const float MaximumAcceptedCornerResidualPixels = 11f;
+    private const float MinimumAcceptedTagPixelSize = 42f;
+    private const float NearFrontoParallelCosine = 0.94f;
+    private const float WeakMeasurementConfidence = 0.52f;
+    private const float MaximumWeakMeasurementNormalJumpDegrees = 7f;
+    private const float MaximumWeakMeasurementPositionJumpMeters = 0.035f;
     private const float PositionFilterTimeConstantSeconds = 0.12f;
     private const float RotationFilterTimeConstantSeconds = 0.16f;
     private const float MinimumFilterConfidence = 0.18f;
@@ -74,6 +85,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private readonly float[] _nativeDetection = new float[12];
     private readonly float[] _nativePoseCandidates = new float[PoseCandidateStride * MaximumPoseCandidates];
     private readonly float[] _nativeOfficialPoseCandidates = new float[PoseCandidateStride * MaximumPoseCandidates];
+    private readonly float[] _activeDistortionCoefficients = new float[5];
     private Text _statusLabel;
     private Button _connectDroneButton;
     private Text _candidateDiagnosticLabel;
@@ -86,11 +98,18 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     private float _lastPoseUpdateTime = float.NegativeInfinity;
     private XRCameraIntrinsics _cachedIntrinsics;
     private bool _hasCachedIntrinsics;
+    private CpuCameraCalibrationProfile _offlineCameraCalibration;
+    private bool _hasOfflineCameraCalibration;
+    private string _activeCalibrationSource = "ARCore CPU intrinsics with zero distortion";
     private Vector3 _trackedTagWorldPosition;
     private Quaternion _trackedTagWorldRotation;
     private Vector3 _selectedCubeWorldPosition;
     private Quaternion _selectedCubeWorldRotation;
     private bool _hasTrackedTagWorldPose;
+    private Vector3 _lastAcceptedTagWorldPosition;
+    private Quaternion _lastAcceptedTagWorldRotation;
+    private Vector3 _lastAcceptedWorldNormal;
+    private bool _hasLastAcceptedMeasurement;
     private Vector3 _pendingTagWorldPosition;
     private Quaternion _pendingTagWorldRotation;
     private int _pendingPoseFrames;
@@ -137,6 +156,53 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     };
     private readonly RelativeRotationDiagnostic _openCvRelativeRotationDiagnostic = new();
     private bool _hasLoggedHandEyeConventionAudit;
+
+    [Serializable]
+    private sealed class CpuCameraCalibrationProfile
+    {
+        public bool enabled;
+        public int cpuImageWidth;
+        public int cpuImageHeight;
+        public float fx;
+        public float fy;
+        public float cx;
+        public float cy;
+        public float[] distortionCoefficients;
+    }
+
+    private readonly struct PoseMeasurementQuality
+    {
+        public PoseMeasurementQuality(float reprojectionRms, float maximumCornerResidual, float tagPixelSize, float frontoParallelCosine)
+        {
+            this.reprojectionRms = reprojectionRms;
+            this.maximumCornerResidual = maximumCornerResidual;
+            this.tagPixelSize = tagPixelSize;
+            this.frontoParallelCosine = frontoParallelCosine;
+        }
+
+        public float reprojectionRms { get; }
+        public float maximumCornerResidual { get; }
+        public float tagPixelSize { get; }
+        public float frontoParallelCosine { get; }
+    }
+
+    private readonly struct PoseMeasurementDecision
+    {
+        public PoseMeasurementDecision(bool accepted, float confidence, float normalJumpDegrees, float positionJumpMeters, string reason)
+        {
+            this.accepted = accepted;
+            this.confidence = confidence;
+            this.normalJumpDegrees = normalJumpDegrees;
+            this.positionJumpMeters = positionJumpMeters;
+            this.reason = reason;
+        }
+
+        public bool accepted { get; }
+        public float confidence { get; }
+        public float normalJumpDegrees { get; }
+        public float positionJumpMeters { get; }
+        public string reason { get; }
+    }
 
     private readonly struct CameraFrameContext
     {
@@ -388,6 +454,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
     {
         DisableLegacyPlacementPrototype();
         EnsurePhoneArCameraIsEnabled();
+        LoadOfflineCameraCalibrationProfile();
         CreateUi();
         AprilTagScanSession.Clear();
     }
@@ -659,6 +726,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
                     cx,
                     cy,
                     PrintedTagSizeMeters,
+                    _activeDistortionCoefficients,
                     _nativeDetection,
                     _nativePoseCandidates,
                     _nativeOfficialPoseCandidates);
@@ -735,7 +803,83 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         fy = _cachedIntrinsics.focalLength.y * imageToIntrinsicsScale.y;
         cx = _cachedIntrinsics.principalPoint.x * imageToIntrinsicsScale.x;
         cy = _cachedIntrinsics.principalPoint.y * imageToIntrinsicsScale.y;
+        Array.Clear(_activeDistortionCoefficients, 0, _activeDistortionCoefficients.Length);
+        _activeCalibrationSource = "ARCore CPU intrinsics with zero distortion";
+
+        if (_hasOfflineCameraCalibration &&
+            _offlineCameraCalibration.cpuImageWidth == imageSize.x &&
+            _offlineCameraCalibration.cpuImageHeight == imageSize.y)
+        {
+            fx = _offlineCameraCalibration.fx;
+            fy = _offlineCameraCalibration.fy;
+            cx = _offlineCameraCalibration.cx;
+            cy = _offlineCameraCalibration.cy;
+            Array.Copy(_offlineCameraCalibration.distortionCoefficients, _activeDistortionCoefficients, _activeDistortionCoefficients.Length);
+            _activeCalibrationSource = "offline CPU-image calibration profile";
+        }
+
+        if (_hasOfflineCameraCalibration && _activeCalibrationSource != "offline CPU-image calibration profile")
+        {
+            Debug.LogWarning(
+                $"[DJIAprilTag] Offline calibration profile was ignored because it targets " +
+                $"{_offlineCameraCalibration.cpuImageWidth}x{_offlineCameraCalibration.cpuImageHeight}, but the current CPU image is {imageSize.x}x{imageSize.y}.");
+            _hasOfflineCameraCalibration = false;
+        }
+
         return fx > 0f && fy > 0f;
+    }
+
+    private void LoadOfflineCameraCalibrationProfile()
+    {
+        _hasOfflineCameraCalibration = false;
+        Debug.Log(
+            "[DJIAprilTag] Camera-model audit: ARCore supplies unrotated CPU-image intrinsics through AR Foundation. " +
+            "AR Foundation does not expose a verified active Camera2 physical-camera ID or Camera2 LENS_DISTORTION mapping for this CPU stream; " +
+            "only an exact-mode offline OpenCV calibration profile may enable non-zero distortion.");
+        var profileAsset = Resources.Load<TextAsset>(CpuCameraCalibrationResourceName);
+        if (profileAsset == null)
+        {
+            Debug.Log(
+                "[DJIAprilTag] No offline CPU-image camera calibration profile is installed. " +
+                "ARCore CPU intrinsics will be used with zero distortion.");
+            return;
+        }
+
+        try
+        {
+            _offlineCameraCalibration = JsonUtility.FromJson<CpuCameraCalibrationProfile>(profileAsset.text);
+        }
+        catch (Exception exception)
+        {
+            Debug.LogWarning($"[DJIAprilTag] Offline CPU-image calibration profile could not be parsed: {exception.Message}");
+            return;
+        }
+
+        if (_offlineCameraCalibration == null || !_offlineCameraCalibration.enabled ||
+            _offlineCameraCalibration.cpuImageWidth <= 0 || _offlineCameraCalibration.cpuImageHeight <= 0 ||
+            _offlineCameraCalibration.fx <= 0f || _offlineCameraCalibration.fy <= 0f ||
+            _offlineCameraCalibration.distortionCoefficients == null || _offlineCameraCalibration.distortionCoefficients.Length != 5)
+        {
+            Debug.Log(
+                "[DJIAprilTag] Offline CPU-image calibration profile is disabled or incomplete. " +
+                "ARCore CPU intrinsics will remain active.");
+            return;
+        }
+
+        foreach (var coefficient in _offlineCameraCalibration.distortionCoefficients)
+        {
+            if (float.IsNaN(coefficient) || float.IsInfinity(coefficient))
+            {
+                Debug.LogWarning("[DJIAprilTag] Offline CPU-image calibration profile has non-finite distortion coefficients and was ignored.");
+                return;
+            }
+        }
+
+        _hasOfflineCameraCalibration = true;
+        Debug.Log(
+            $"[DJIAprilTag] Offline CPU-image camera calibration profile loaded for " +
+            $"{_offlineCameraCalibration.cpuImageWidth}x{_offlineCameraCalibration.cpuImageHeight}; " +
+            "OpenCV distortion order is [k1,k2,p1,p2,k3].");
     }
 
     private void LogCpuImageDiagnostics(
@@ -766,6 +910,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             $"rawFxFy=({_cachedIntrinsics.focalLength.x:F3},{_cachedIntrinsics.focalLength.y:F3}) " +
             $"rawCxCy=({_cachedIntrinsics.principalPoint.x:F3},{_cachedIntrinsics.principalPoint.y:F3}) " +
             $"passedFxFyCxCy=({fx:F3},{fy:F3},{cx:F3},{cy:F3}) " +
+            $"calibrationSource={_activeCalibrationSource} distortionOpenCv=[{_activeDistortionCoefficients[0]:F6},{_activeDistortionCoefficients[1]:F6},{_activeDistortionCoefficients[2]:F6},{_activeDistortionCoefficients[3]:F6},{_activeDistortionCoefficients[4]:F6}] " +
             $"IPPECandidates={poseCandidateCount} cpuTimestamp={image.timestamp:F6}s frameTimestamp={frameTimestampSeconds:F6}s delta={timestampDeltaMilliseconds:F3}ms " +
             $"screen={Screen.orientation}/{Screen.width}x{Screen.height} device={Input.deviceOrientation} " +
             $"displayUv={DescribeDisplayUvTransform(frameContext.displayMatrix)} " +
@@ -841,16 +986,17 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         var bestTagPosition = Vector3.zero;
         var bestCubeRotation = Quaternion.identity;
         var bestWorldNormal = Vector3.zero;
+        var bestQuality = default(PoseMeasurementQuality);
         var bestCandidateIndex = -1;
         var candidateLimit = Mathf.Min(poseCandidateCount, MaximumPoseCandidates);
 
         for (var candidateIndex = 0; candidateIndex < candidateLimit; ++candidateIndex)
         {
             var offset = candidateIndex * PoseCandidateStride;
-            var reprojectionError = _nativePoseCandidates[offset + 12];
-            if (float.IsNaN(reprojectionError) || float.IsInfinity(reprojectionError) ||
-                reprojectionError > MaximumAcceptedReprojectionRmsPixels)
+            if (!TryGetPoseMeasurementQuality(_nativePoseCandidates, offset, out var quality) ||
+                quality.reprojectionRms > MaximumAcceptedReprojectionRmsPixels)
                 continue;
+            var reprojectionError = quality.reprojectionRms;
 
             if (!TryConvertNativePose(offset, out var tagPosition, out var cubeCameraRotation, out _))
                 continue;
@@ -909,6 +1055,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             bestTagPosition = tagWorldPosition;
             bestCubeRotation = cubeWorldRotation;
             bestWorldNormal = worldNormal;
+            bestQuality = quality;
             bestCandidateIndex = candidateIndex;
         }
 
@@ -917,6 +1064,24 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             Debug.Log(candidateLimit == 0
                 ? "[DJIAprilTag] Native PnP returned no valid candidates for this camera frame."
                 : "[DJIAprilTag] Unity rejected every raw OpenCV PnP candidate before world-pose selection.");
+            return false;
+        }
+
+        var measurementDecision = EvaluateMeasurement(
+            bestTagPosition,
+            bestCubeRotation,
+            bestWorldNormal,
+            bestQuality,
+            frameContext.cameraPose);
+        if (!measurementDecision.accepted)
+        {
+            LogPoseMeasurementValidation(bestCandidateIndex, bestWorldNormal, bestQuality, measurementDecision);
+            if (_hasTrackedTagWorldPose)
+            {
+                HoldLastReliableWorldPose();
+                return true;
+            }
+
             return false;
         }
 
@@ -929,14 +1094,24 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
             TrackPendingPose(bestTagPosition, bestCubeRotation);
             if (_pendingPoseFrames < PoseSwitchConfirmationFrames)
             {
+                LogPoseMeasurementValidation(
+                    bestCandidateIndex,
+                    bestWorldNormal,
+                    bestQuality,
+                    new PoseMeasurementDecision(false, measurementDecision.confidence, measurementDecision.normalJumpDegrees, measurementDecision.positionJumpMeters, "temporal continuity gate"));
                 Debug.Log($"[DJIAprilTag] Unity pose selection candidate={bestCandidateIndex} deferred by continuity gate ({_pendingPoseFrames}/{PoseSwitchConfirmationFrames}).");
                 return true;
             }
         }
 
         _pendingPoseFrames = 0;
-        ApplyFilteredWorldPose(bestTagPosition, bestCubeRotation, reprojectionError: _candidateRmsScores[bestCandidateIndex]);
+        ApplyFilteredWorldPose(bestTagPosition, bestCubeRotation, measurementDecision.confidence);
         _hasTrackedTagWorldPose = true;
+        _lastAcceptedTagWorldPosition = bestTagPosition;
+        _lastAcceptedTagWorldRotation = bestCubeRotation;
+        _lastAcceptedWorldNormal = bestWorldNormal;
+        _hasLastAcceptedMeasurement = true;
+        LogPoseMeasurementValidation(bestCandidateIndex, bestWorldNormal, bestQuality, measurementDecision);
         Debug.Log(
             $"[DJIAprilTag] Unity selected raw OpenCV PnP candidate={bestCandidateIndex} " +
             $"mode={poseCandidateDiagnosticMode} score={bestScore:F4} " +
@@ -944,7 +1119,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         return true;
     }
 
-    private void ApplyFilteredWorldPose(Vector3 rawTagWorldPosition, Quaternion rawCubeWorldRotation, float reprojectionError)
+    private void ApplyFilteredWorldPose(Vector3 rawTagWorldPosition, Quaternion rawCubeWorldRotation, float measurementConfidence)
     {
         var now = Time.unscaledTime;
         if (!_hasTrackedTagWorldPose || float.IsNegativeInfinity(_lastPoseFilterTime))
@@ -955,10 +1130,7 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         else
         {
             var elapsedSeconds = Mathf.Clamp(now - _lastPoseFilterTime, 0.001f, 0.2f);
-            var confidence = Mathf.Lerp(
-                MinimumFilterConfidence,
-                1f,
-                Mathf.InverseLerp(MaximumAcceptedReprojectionRmsPixels, 0.5f, reprojectionError));
+            var confidence = Mathf.Lerp(MinimumFilterConfidence, 1f, measurementConfidence);
             var positionAlpha = (1f - Mathf.Exp(-elapsedSeconds / PositionFilterTimeConstantSeconds)) * confidence;
             var rotationAlpha = (1f - Mathf.Exp(-elapsedSeconds / RotationFilterTimeConstantSeconds)) * confidence;
 
@@ -972,6 +1144,116 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _selectedCubeWorldPosition = _trackedTagWorldPosition +
             (_selectedCubeWorldRotation * Vector3.up) * (PreviewCubeSizeMeters * 0.5f);
         _lastPoseFilterTime = now;
+    }
+
+    private static bool TryGetPoseMeasurementQuality(float[] poseCandidates, int offset, out PoseMeasurementQuality quality)
+    {
+        quality = default;
+        if (poseCandidates == null || offset < 0 || offset + PoseCandidateStride > poseCandidates.Length)
+            return false;
+
+        var reprojectionRms = poseCandidates[offset + ReprojectionRmsOffset];
+        var maximumCornerResidual = poseCandidates[offset + MaximumCornerResidualOffset];
+        var tagPixelSize = poseCandidates[offset + TagPixelSizeOffset];
+        var frontoParallelCosine = poseCandidates[offset + FrontoParallelCosineOffset];
+        if (float.IsNaN(reprojectionRms) || float.IsInfinity(reprojectionRms) ||
+            float.IsNaN(maximumCornerResidual) || float.IsInfinity(maximumCornerResidual) ||
+            float.IsNaN(tagPixelSize) || float.IsInfinity(tagPixelSize) ||
+            float.IsNaN(frontoParallelCosine) || float.IsInfinity(frontoParallelCosine))
+        {
+            return false;
+        }
+
+        quality = new PoseMeasurementQuality(
+            reprojectionRms,
+            maximumCornerResidual,
+            tagPixelSize,
+            Mathf.Clamp01(frontoParallelCosine));
+        return true;
+    }
+
+    private PoseMeasurementDecision EvaluateMeasurement(
+        Vector3 rawTagWorldPosition,
+        Quaternion rawCubeWorldRotation,
+        Vector3 rawWorldNormal,
+        PoseMeasurementQuality quality,
+        Pose currentCameraPose)
+    {
+        var reprojectionQuality = Mathf.InverseLerp(MaximumAcceptedReprojectionRmsPixels, 1f, quality.reprojectionRms);
+        var cornerQuality = Mathf.InverseLerp(MaximumAcceptedCornerResidualPixels, 1f, quality.maximumCornerResidual);
+        var pixelSizeQuality = Mathf.InverseLerp(MinimumAcceptedTagPixelSize, 180f, quality.tagPixelSize);
+        var frontalQuality = 1f - Mathf.InverseLerp(NearFrontoParallelCosine, 0.999f, quality.frontoParallelCosine);
+        var normalJumpDegrees = 0f;
+        var positionJumpMeters = 0f;
+        var temporalQuality = 1f;
+        if (_hasLastAcceptedMeasurement)
+        {
+            normalJumpDegrees = Vector3.Angle(_lastAcceptedWorldNormal, rawWorldNormal);
+            positionJumpMeters = Vector3.Distance(_lastAcceptedTagWorldPosition, rawTagWorldPosition);
+            temporalQuality = Mathf.Min(
+                Mathf.InverseLerp(35f, 0f, normalJumpDegrees),
+                Mathf.InverseLerp(0.12f, 0f, positionJumpMeters));
+
+            // A fixed world tag becomes a camera-relative prediction through
+            // the current ARCore pose; no hand-eye correction is introduced.
+            var predictedCameraNormal = Quaternion.Inverse(currentCameraPose.rotation) * _lastAcceptedWorldNormal;
+            var measuredCameraNormal = Quaternion.Inverse(currentCameraPose.rotation) * rawWorldNormal;
+            var arCorePriorNormalError = Vector3.Angle(predictedCameraNormal, measuredCameraNormal);
+            temporalQuality = Mathf.Min(temporalQuality, Mathf.InverseLerp(35f, 0f, arCorePriorNormalError));
+        }
+
+        var confidence = 0.30f * reprojectionQuality +
+                         0.25f * cornerQuality +
+                         0.20f * pixelSizeQuality +
+                         0.10f * frontalQuality +
+                         0.15f * temporalQuality;
+        if (quality.maximumCornerResidual > MaximumAcceptedCornerResidualPixels)
+        {
+            return new PoseMeasurementDecision(false, confidence, normalJumpDegrees, positionJumpMeters, "maximum corner residual exceeds limit");
+        }
+
+        if (quality.tagPixelSize < MinimumAcceptedTagPixelSize)
+        {
+            return new PoseMeasurementDecision(false, confidence, normalJumpDegrees, positionJumpMeters, "tag is too small in the CPU image");
+        }
+
+        var nearFrontoParallel = quality.frontoParallelCosine >= NearFrontoParallelCosine;
+        var weakAndInconsistent = confidence < WeakMeasurementConfidence &&
+                                  (normalJumpDegrees > MaximumWeakMeasurementNormalJumpDegrees ||
+                                   positionJumpMeters > MaximumWeakMeasurementPositionJumpMeters);
+        if (_hasLastAcceptedMeasurement && nearFrontoParallel && weakAndInconsistent)
+        {
+            return new PoseMeasurementDecision(false, confidence, normalJumpDegrees, positionJumpMeters, "near-fronto-parallel low-confidence pose conflicts with ARCore world-pose prior");
+        }
+
+        return new PoseMeasurementDecision(true, confidence, normalJumpDegrees, positionJumpMeters, "accepted");
+    }
+
+    private void HoldLastReliableWorldPose()
+    {
+        _selectedCubeWorldRotation = _trackedTagWorldRotation;
+        _selectedCubeWorldPosition = _trackedTagWorldPosition +
+            (_selectedCubeWorldRotation * Vector3.up) * (PreviewCubeSizeMeters * 0.5f);
+        _lastPoseUpdateTime = Time.unscaledTime;
+    }
+
+    private void LogPoseMeasurementValidation(
+        int candidateIndex,
+        Vector3 rawWorldNormal,
+        PoseMeasurementQuality quality,
+        PoseMeasurementDecision decision)
+    {
+        var filteredWorldNormal = _hasTrackedTagWorldPose
+            ? _trackedTagWorldRotation * Vector3.up
+            : rawWorldNormal;
+        var rawTiltAngle = Mathf.Acos(Mathf.Clamp(quality.frontoParallelCosine, -1f, 1f)) * Mathf.Rad2Deg;
+        Debug.Log(
+            $"[DJIAprilTag] Pose measurement candidate={candidateIndex} rawTiltAngle={rawTiltAngle:F2}deg " +
+            $"accepted={decision.accepted} reason={decision.reason} confidence={decision.confidence:F3} " +
+            $"reprojectionRms={quality.reprojectionRms:F3}px maxCornerResidual={quality.maximumCornerResidual:F3}px " +
+            $"tagPixelSize={quality.tagPixelSize:F2}px frontoParallelCosine={quality.frontoParallelCosine:F4} " +
+            $"rawWorldNormal={rawWorldNormal.ToString("F4")} filteredWorldNormal={filteredWorldNormal.ToString("F4")} " +
+            $"angleFromLastAcceptedNormal={decision.normalJumpDegrees:F2}deg positionJump={decision.positionJumpMeters:F4}m.");
     }
 
     private void LogRawEstimatorComparison(CameraFrameContext frameContext)
@@ -1901,6 +2183,10 @@ public sealed class PhoneAprilTagScanController : MonoBehaviour
         _openCvCameraNormalStationaryFrames = 0;
         _hasOfficialCameraNormalBaseline = false;
         _officialCameraNormalStationaryFrames = 0;
+        _hasLastAcceptedMeasurement = false;
+        _lastAcceptedTagWorldPosition = Vector3.zero;
+        _lastAcceptedTagWorldRotation = Quaternion.identity;
+        _lastAcceptedWorldNormal = Vector3.zero;
         foreach (var diagnostic in _openCvCameraFrameBasisDiagnostics)
             diagnostic.Reset();
         foreach (var diagnostic in _officialCameraFrameBasisDiagnostics)

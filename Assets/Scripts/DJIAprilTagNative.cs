@@ -52,6 +52,8 @@ internal static class DJIAprilTagNative
         float cx,
         float cy,
         float tagSizeMeters,
+        [In] float[] distortionCoefficients,
+        int distortionCoefficientsLength,
         [Out] float[] outDetection,
         int outDetectionLength,
         [Out] float[] outOpenCvPoseCandidates,
@@ -163,12 +165,14 @@ internal static class DJIAprilTagNative
         float cx,
         float cy,
         float tagSizeMeters,
+        float[] distortionCoefficients,
         float[] outDetection,
         float[] outOpenCvPoseCandidates,
         float[] outOfficialPoseCandidates)
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
-        if (rgbaBytes == null || outDetection == null || outOpenCvPoseCandidates == null || outOfficialPoseCandidates == null)
+        if (rgbaBytes == null || distortionCoefficients == null || distortionCoefficients.Length != 5 ||
+            outDetection == null || outOpenCvPoseCandidates == null || outOfficialPoseCandidates == null)
             return 0;
 
         return DJI_DetectAprilTagPoseComparisonRgba32(
@@ -180,6 +184,8 @@ internal static class DJIAprilTagNative
             cx,
             cy,
             tagSizeMeters,
+            distortionCoefficients,
+            distortionCoefficients.Length,
             outDetection,
             outDetection.Length,
             outOpenCvPoseCandidates,
