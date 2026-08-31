@@ -25,6 +25,5 @@ internal static class DJIDroneViewBootstrap
             background.backgroundMat = new Material(backgroundShader);
 
         background.verboseLogs = false;
-        cameraObject.AddComponent<DJIAprilTagMarkerMvpController>();
     }
 }
