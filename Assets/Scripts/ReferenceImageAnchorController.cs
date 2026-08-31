@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
@@ -34,16 +35,26 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     [SerializeField] private Button resetButton;
 
     [Header("Diagnostics")]
-    [SerializeField] private bool debugLogging;
+    [SerializeField] private bool debugLogging = true;
     [SerializeField, Min(0.1f)] private float debugLogInterval = 1f;
 
     private ScanState _state;
     private ARAnchor _anchor;
+    private GameObject _cube;
+    private Renderer _cubeRenderer;
     private bool _anchorCreationInProgress;
     private TrackingState _lastTrackingState = TrackingState.None;
     private bool _hasSeenReferenceImage;
+    private bool _targetImageAdded;
+    private bool _targetReachedTracking;
+    private bool _anchorCreationFailed;
     private float _nextDebugLogTime;
     private int _scanGeneration;
+
+    public ARTrackedImageManager ConfiguredTrackedImageManager => trackedImageManager;
+    public ARAnchorManager ConfiguredAnchorManager => anchorManager;
+    public string TargetReferenceImageName => referenceImageName;
+    public float ConfiguredImageWidthMeters => configuredImageWidthMeters;
 
     private void Awake()
     {
@@ -66,6 +77,11 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     {
         if (trackedImageManager != null)
             trackedImageManager.trackablesChanged.AddListener(OnTrackablesChanged);
+    }
+
+    private void Start()
+    {
+        StartCoroutine(RunStartupDiagnostics());
     }
 
     private void OnDisable()
@@ -100,7 +116,12 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         }
 
         _anchor = null;
+        _cube = null;
+        _cubeRenderer = null;
         _hasSeenReferenceImage = false;
+        _targetImageAdded = false;
+        _targetReachedTracking = false;
+        _anchorCreationFailed = false;
         _lastTrackingState = TrackingState.None;
         SetConnectButtonVisible(false);
         SetResetButtonVisible(false);
@@ -128,13 +149,22 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     private void OnTrackablesChanged(ARTrackablesChangedEventArgs<ARTrackedImage> changes)
     {
         foreach (var trackedImage in changes.added)
+        {
+            LogTrackedImageEvent("TRACKED_IMAGE_ADDED", trackedImage);
+            if (IsConfiguredReferenceImage(trackedImage))
+                _targetImageAdded = true;
             ProcessTrackedImage(trackedImage);
+        }
 
         foreach (var trackedImage in changes.updated)
+        {
+            LogTrackedImageEvent("TRACKED_IMAGE_UPDATED", trackedImage);
             ProcessTrackedImage(trackedImage);
+        }
 
         foreach (var trackedImage in changes.removed)
         {
+            LogTrackedImageEvent("TRACKED_IMAGE_REMOVED", trackedImage);
             if (IsConfiguredReferenceImage(trackedImage))
                 HandleTrackingState(TrackingState.None);
         }
@@ -146,10 +176,15 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             return;
 
         HandleTrackingState(trackedImage.trackingState);
+        if (trackedImage.trackingState == TrackingState.Tracking)
+            _targetReachedTracking = true;
+
         if (trackedImage.trackingState != TrackingState.Tracking || _anchor != null || _anchorCreationInProgress)
             return;
 
         _anchorCreationInProgress = true;
+        Debug.Log($"[Reference Image] ACQUIRE_POSE_STARTED name={trackedImage.referenceImage.name} position={trackedImage.transform.position} rotation={trackedImage.transform.rotation.eulerAngles}");
+        Debug.Log($"[Reference Image] ANCHOR_CREATE_REQUESTED name={trackedImage.referenceImage.name}");
         SetState(ScanState.AcquirePose, "Referencia-kép felismerve. A pozíció rögzítése folyamatban van.");
         CreateAnchorAsync(new Pose(trackedImage.transform.position, trackedImage.transform.rotation), _scanGeneration);
     }
@@ -164,7 +199,8 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
             if (!result.status.IsSuccess() || result.value == null)
             {
-                Debug.LogWarning($"[Reference Image] Anchor creation failed: {result.status}");
+                _anchorCreationFailed = true;
+                Debug.LogWarning($"[Reference Image] ANCHOR_CREATE_FAILED status={result.status}");
                 SetState(ScanState.Searching, "A referencia-kép megvan, de az AR rögzítés nem sikerült. Próbálja újra.");
                 return;
             }
@@ -179,7 +215,8 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         }
         catch (Exception exception)
         {
-            Debug.LogWarning($"[Reference Image] Anchor creation exception: {exception.Message}");
+            _anchorCreationFailed = true;
+            Debug.LogWarning($"[Reference Image] ANCHOR_CREATE_FAILED exception={exception.Message}");
             if (requestGeneration == _scanGeneration)
                 SetState(ScanState.Searching, "Az AR rögzítés nem elérhető. Mozgassa lassan a telefont, majd próbálja újra.");
         }
@@ -198,16 +235,20 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         contentAlignment.localPosition = Vector3.zero;
         contentAlignment.localRotation = Quaternion.identity;
 
-        var cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        cube.name = "Cube";
-        cube.transform.SetParent(contentAlignment, false);
-        cube.transform.localScale = Vector3.one * cubeSizeMeters;
+        _cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        _cube.name = "Cube";
+        _cube.transform.SetParent(contentAlignment, false);
+        _cube.transform.localScale = Vector3.one * cubeSizeMeters;
         // The cube's local bottom face rests on the reference-image plane at local Y = 0.
-        cube.transform.localPosition = Vector3.up * (cubeSizeMeters * 0.5f);
+        _cube.transform.localPosition = Vector3.up * (cubeSizeMeters * 0.5f);
 
-        var renderer = cube.GetComponent<Renderer>();
-        if (renderer != null)
-            renderer.material = CreateRuntimeMaterial(cubeColor);
+        _cubeRenderer = _cube.GetComponent<Renderer>();
+        if (_cubeRenderer != null)
+            _cubeRenderer.material = CreateRuntimeMaterial(cubeColor);
+
+        Debug.Log($"[Reference Image] CUBE_CREATED hierarchy={_cube.transform.GetHierarchyPath()} localPosition={_cube.transform.localPosition} localScale={_cube.transform.localScale}");
+        Debug.Log($"[Reference Image] CUBE_ACTIVE activeSelf={_cube.activeSelf} activeInHierarchy={_cube.activeInHierarchy}");
+        Debug.Log($"[Reference Image] CUBE_RENDERER_ENABLED rendererFound={_cubeRenderer != null} enabled={_cubeRenderer != null && _cubeRenderer.enabled}");
     }
 
     private void HandleTrackingState(TrackingState trackingState)
@@ -362,5 +403,90 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             material.SetColor("_Color", color);
 
         return material;
+    }
+
+    private IEnumerator RunStartupDiagnostics()
+    {
+        // Wait for AR Foundation to create the runtime image library before inspecting it.
+        yield return null;
+
+        var library = trackedImageManager != null ? trackedImageManager.referenceLibrary : null;
+        var libraryCount = library?.count ?? 0;
+        var containsTarget = false;
+
+        Debug.Log($"[Reference Image] STARTUP trackedImageManagerEnabled={trackedImageManager != null && trackedImageManager.enabled} managerActive={trackedImageManager != null && trackedImageManager.gameObject.activeInHierarchy} controllerActive={gameObject.activeInHierarchy}");
+        Debug.Log($"[Reference Image] STARTUP referenceLibraryAssigned={library != null} referenceLibraryCount={libraryCount} requestedMaxNumberOfMovingImages={trackedImageManager?.requestedMaxNumberOfMovingImages ?? -1} currentMaxNumberOfMovingImages={trackedImageManager?.currentMaxNumberOfMovingImages ?? -1}");
+        Debug.Log($"[Reference Image] STARTUP arSessionState={ARSession.state} notTrackingReason={ARSession.notTrackingReason} imageTrackingSubsystemAvailable={trackedImageManager != null && trackedImageManager.subsystem != null} imageTrackingSubsystemRunning={trackedImageManager != null && trackedImageManager.subsystem != null && trackedImageManager.subsystem.running}");
+
+        for (var index = 0; index < libraryCount; index++)
+        {
+            var referenceImage = library[index];
+            var matchesTarget = referenceImage.name == referenceImageName;
+            containsTarget |= matchesTarget;
+            Debug.Log($"[Reference Image] RUNTIME_LIBRARY_IMAGE index={index} name={referenceImage.name} size={referenceImage.size} specifiedSize={referenceImage.specifySize} matchesBuildingReference={matchesTarget}");
+        }
+
+        Debug.Log($"[Reference Image] STARTUP buildingReferenceExists={containsTarget} targetReferenceImageName={referenceImageName} expectedPhysicalWidthMeters={configuredImageWidthMeters:F3} applicationId={Application.identifier} version={Application.version} unityVersion={Application.unityVersion}");
+        Debug.Log("[Reference Image] BUILD_NOTE The Android player must be rebuilt with Build And Run after changing BuildingReference.png or BuildingReferenceImageLibrary.asset.");
+
+        yield return new WaitForSecondsRealtime(10f);
+        ReportAcquisitionDiagnosis();
+    }
+
+    private void ReportAcquisitionDiagnosis()
+    {
+        if (!_targetImageAdded)
+        {
+            Debug.LogWarning("[Reference Image] DIAGNOSIS_A_RUNTIME_LIBRARY_OR_IMAGE_RECOGNITION_FAILURE reason=NO_TRACKED_IMAGE_ADDED_FOR_BuildingReference anchorWasNotRequested=true");
+            return;
+        }
+
+        if (!_targetReachedTracking)
+        {
+            Debug.LogWarning("[Reference Image] DIAGNOSIS_B_TRACKED_IMAGE_NEVER_REACHES_TRACKING reason=BuildingReference_added_but_not_tracking");
+            return;
+        }
+
+        if (_anchor == null)
+        {
+            var reason = _anchorCreationFailed ? "ANCHOR_CREATE_FAILED" : "ANCHOR_NOT_RETURNED";
+            Debug.LogWarning($"[Reference Image] DIAGNOSIS_C_TRACKING_WORKS_BUT_ANCHOR_CREATION_FAILS reason={reason}");
+            return;
+        }
+
+        if (_cube == null || _cubeRenderer == null || !_cube.activeInHierarchy || !_cubeRenderer.enabled)
+        {
+            Debug.LogError($"[Reference Image] DIAGNOSIS_D_ANCHOR_EXISTS_BUT_CUBE_RENDERING_OR_HIERARCHY_FAILS cubeExists={_cube != null} rendererExists={_cubeRenderer != null} cubeActive={_cube != null && _cube.activeInHierarchy} rendererEnabled={_cubeRenderer != null && _cubeRenderer.enabled}");
+            return;
+        }
+
+        Debug.Log("[Reference Image] DIAGNOSIS_READY tracking_anchor_and_cube_are_active");
+    }
+
+    private void LogTrackedImageEvent(string eventName, ARTrackedImage trackedImage)
+    {
+        if (trackedImage == null)
+        {
+            Debug.Log($"[Reference Image] {eventName} image=null");
+            return;
+        }
+
+        var referenceName = trackedImage.referenceImage.name;
+        Debug.Log($"[Reference Image] {eventName} name={referenceName} trackingState={trackedImage.trackingState} position={trackedImage.transform.position} rotation={trackedImage.transform.rotation.eulerAngles} estimatedSize={trackedImage.size} matchesBuildingReference={referenceName == referenceImageName}");
+    }
+}
+
+internal static class ReferenceImageTransformDiagnostics
+{
+    public static string GetHierarchyPath(this Transform transform)
+    {
+        var path = transform.name;
+        while (transform.parent != null)
+        {
+            transform = transform.parent;
+            path = $"{transform.name}/{path}";
+        }
+
+        return path;
     }
 }
