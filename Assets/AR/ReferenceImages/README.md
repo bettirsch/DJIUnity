@@ -1,13 +1,15 @@
 # Building Reference Image
 
-`BuildingReferenceImageLibrary.asset` is the ARCore image-tracking library used by the phone scan scene. It currently contains `BuildingReference`, backed by `BuildingReferencePlaceholder.png`.
+`BuildingReference.png` is the actual AR Foundation / ARCore tracking target. It is a deterministic, grayscale-safe, 1800 x 1800 pixel artwork with deliberately asymmetric, high-contrast local features. Regenerate it with:
 
-The placeholder is only an implementation target. Before field use, replace it with the final printed artwork and set the entry's physical width to the measured printed width in metres. The placeholder is currently configured as `0.42 m` wide and square; that is not a final project measurement.
+```powershell
+./Tools/GenerateBuildingReferenceImage.ps1
+```
 
-To replace the image in Unity:
+The target must be printed at exactly `180 mm x 180 mm`. Accordingly, `BuildingReferenceImageLibrary.asset` contains the single `BuildingReference` entry with `Specify Size` enabled and a physical width of `0.18 m`.
 
-1. Import the final flat, non-glossy, high-detail artwork into this folder.
-2. Open `BuildingReferenceImageLibrary.asset` and replace the `BuildingReference` texture.
-3. Set the exact printed width in the library entry. Unity derives the height from the artwork aspect ratio.
-4. Run `Tools > DJI > Configure Reference Image Tracking` to reapply the scan-scene wiring.
-5. Build the Android player so ARCore generates the runtime image database from the new source texture.
+Use `Print/BuildingReference_A4.png` to print the target on an A4 portrait sheet. Print at `100%`, `Actual Size`, or the equivalent setting, and disable `Fit to page`. Measure the supplied 100 mm scale after printing before scanning.
+
+For monitor testing, the library still assumes a physical target width of 180 mm. Either display `BuildingReference.png` at exactly 180 mm wide on the screen, measured with a ruler, or temporarily change the reference image library's physical width to the measured on-screen width. Merely zooming the image without updating the configured width produces incorrect AR scale and distance estimates.
+
+`Tools > DJI > Configure Reference Image Tracking` always restores the scene wiring, the `BuildingReference` entry, `BuildingReference.png`, and the required `0.18 m` width. Build the Android player after changing the source artwork so ARCore rebuilds its runtime image database.

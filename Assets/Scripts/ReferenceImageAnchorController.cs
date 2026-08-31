@@ -19,7 +19,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     [Header("Reference image")]
     [SerializeField] private string referenceImageName = "BuildingReference";
-    [SerializeField, Min(0.01f)] private float configuredImageWidthMeters = 0.42f;
+    [SerializeField, Min(0.01f)] private float configuredImageWidthMeters = 0.18f;
 
     [Header("Content")]
     [SerializeField, Min(0.01f)] private float cubeSizeMeters = 0.14f;

@@ -21,9 +21,9 @@ MonoBehaviour:
       m_GuidLow: 5687060335809158668
       m_GuidHigh: 8984970262469388430
     m_SerializedTextureGuid:
-      m_GuidLow: 4892571089726564983
-      m_GuidHigh: 139856540132811958
-    m_Size: {x: 0.42, y: 0.42}
+      m_GuidLow: 4821892428245978542
+      m_GuidHigh: 1782481658723017369
+    m_Size: {x: 0.18, y: 0.18}
     m_SpecifySize: 1
     m_Name: BuildingReference
-    m_Texture: {fileID: 2800000, guid: f17f6a77e77b43e5b6a42142c8def001, type: 3}
+    m_Texture: {fileID: 2800000, guid: b2bf4daecd9d42ea99a2d5e69fa5bc18, type: 3}

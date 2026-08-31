@@ -10,8 +10,8 @@ public static class ReferenceImageTrackingSetup
 {
     private const string SampleScenePath = "Assets/Scenes/SampleScene.unity";
     private const string LibraryPath = "Assets/AR/ReferenceImages/BuildingReferenceImageLibrary.asset";
-    private const string PlaceholderTexturePath = "Assets/AR/ReferenceImages/BuildingReferencePlaceholder.png";
-    public const float PlaceholderWidthMeters = 0.42f;
+    private const string TargetTexturePath = "Assets/AR/ReferenceImages/BuildingReference.png";
+    public const float TargetWidthMeters = 0.18f;
 
     [MenuItem("Tools/DJI/Configure Reference Image Tracking")]
     public static void Configure()
@@ -55,7 +55,7 @@ public static class ReferenceImageTrackingSetup
         var connectButton = FindComponentByName<Button>("PlaceButton");
         var resetButton = FindComponentByName<Button>("ResetButton");
         var controller = GetOrAddComponent<ReferenceImageAnchorController>(origin.gameObject);
-        controller.Configure(trackedImageManager, anchorManager, canvas, statusText, connectButton, resetButton, PlaceholderWidthMeters);
+        controller.Configure(trackedImageManager, anchorManager, canvas, statusText, connectButton, resetButton, TargetWidthMeters);
         controller.enabled = true;
 
         EditorUtility.SetDirty(origin.gameObject);
@@ -76,18 +76,18 @@ public static class ReferenceImageTrackingSetup
             AssetDatabase.CreateAsset(library, LibraryPath);
         }
 
-        var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(PlaceholderTexturePath);
+        var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(TargetTexturePath);
         if (texture == null)
-            throw new MissingReferenceException($"Reference image texture is missing: {PlaceholderTexturePath}");
+            throw new MissingReferenceException($"Reference image texture is missing: {TargetTexturePath}");
 
-        if (library.count == 0)
-        {
-            library.Add();
-            library.SetTexture(0, texture, keepTexture: true);
-            library.SetName(0, "BuildingReference");
-            library.SetSpecifySize(0, true);
-            library.SetSize(0, new Vector2(PlaceholderWidthMeters, PlaceholderWidthMeters));
-        }
+        while (library.count > 0)
+            library.RemoveAt(0);
+
+        library.Add();
+        library.SetTexture(0, texture, keepTexture: true);
+        library.SetName(0, "BuildingReference");
+        library.SetSpecifySize(0, true);
+        library.SetSize(0, new Vector2(TargetWidthMeters, TargetWidthMeters));
         return library;
     }
 
