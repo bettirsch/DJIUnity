@@ -162,8 +162,9 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             ProcessTrackedImage(trackedImage);
         }
 
-        foreach (var trackedImage in changes.removed)
+        foreach (var removedTrackable in changes.removed)
         {
+            var trackedImage = removedTrackable.Value;
             LogTrackedImageEvent("TRACKED_IMAGE_REMOVED", trackedImage);
             if (IsConfiguredReferenceImage(trackedImage))
                 HandleTrackingState(TrackingState.None);
