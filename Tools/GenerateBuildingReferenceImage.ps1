@@ -13,9 +13,10 @@ New-Item -ItemType Directory -Force -Path $printDirectory | Out-Null
 $targetPath = Join-Path $referenceDirectory 'BuildingReference.png'
 $printPath = Join-Path $printDirectory 'BuildingReference_A4.png'
 $targetPixels = 1800
+$targetPhysicalSizeMillimeters = 160
 $printWidthPixels = 2480
 $printHeightPixels = 3508
-$targetPrintPixels = 2126
+$targetPrintPixels = 1890
 
 function New-Pen([int]$gray, [float]$width) {
     return [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb($gray, $gray, $gray), $width)
@@ -69,7 +70,8 @@ function Draw-ShortLineCluster($graphics, [System.Random]$random, [int]$left, [i
 
 function Draw-Target() {
     $bitmap = [System.Drawing.Bitmap]::new($targetPixels, $targetPixels, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
-    $bitmap.SetResolution(254, 254)
+    $targetDpi = $targetPixels / $targetPhysicalSizeMillimeters * 25.4
+    $bitmap.SetResolution($targetDpi, $targetDpi)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
@@ -217,7 +219,7 @@ $captionBrush = New-Brush 25
 $captionFormat = [System.Drawing.StringFormat]::new()
 $captionFormat.Alignment = [System.Drawing.StringAlignment]::Center
 $printGraphics.DrawString('Print at 100% / Actual Size', $captionFont, $captionBrush, [System.Drawing.RectangleF]::new(0, 2670, $printWidthPixels, 65), $captionFormat)
-$printGraphics.DrawString('Target size: 180 mm x 180 mm', $captionFont, $captionBrush, [System.Drawing.RectangleF]::new(0, 2735, $printWidthPixels, 65), $captionFormat)
+$printGraphics.DrawString('Target size: 160 mm x 160 mm', $captionFont, $captionBrush, [System.Drawing.RectangleF]::new(0, 2735, $printWidthPixels, 65), $captionFormat)
 
 $rulerLeft = [int](($printWidthPixels - 1181) / 2)
 $rulerY = 3035

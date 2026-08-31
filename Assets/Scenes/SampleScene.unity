@@ -1269,7 +1269,7 @@ MonoBehaviour:
   m_Name:
   m_EditorClassIdentifier:
   referenceImageName: BuildingReference
-  configuredImageWidthMeters: 0.18
+  configuredImageWidthMeters: 0.16
   cubeSizeMeters: 0.14
   cubeColor: {r: 0.12, g: 0.74, b: 0.58, a: 1}
   trackedImageManager: {fileID: 672916555}

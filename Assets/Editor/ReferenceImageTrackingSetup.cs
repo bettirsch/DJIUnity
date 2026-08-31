@@ -11,7 +11,7 @@ public static class ReferenceImageTrackingSetup
     private const string SampleScenePath = "Assets/Scenes/SampleScene.unity";
     private const string LibraryPath = "Assets/AR/ReferenceImages/BuildingReferenceImageLibrary.asset";
     private const string TargetTexturePath = "Assets/AR/ReferenceImages/BuildingReference.png";
-    public const float TargetWidthMeters = 0.18f;
+    public const float TargetWidthMeters = 0.16f;
 
     [MenuItem("Tools/DJI/Configure Reference Image Tracking")]
     public static void Configure()
