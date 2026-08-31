@@ -1179,6 +1179,8 @@ GameObject:
   - component: {fileID: 672916551}
   - component: {fileID: 672916550}
   - component: {fileID: 672916549}
+  - component: {fileID: 672916555}
+  - component: {fileID: 672916556}
   m_Layer: 0
   m_Name: XR Origin
   m_TagString: Untagged
@@ -1227,7 +1229,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 672916548}
-  m_Enabled: 0
+  m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 728ad7fae8e460a4ba41265c7308d757, type: 3}
   m_Name: 
@@ -1236,6 +1238,48 @@ MonoBehaviour:
     m_PersistentCalls:
       m_Calls: []
   m_AnchorPrefab: {fileID: 0}
+--- !u!114 &672916555
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 672916548}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4dea56a9eaadd1c439095de4f9a371cb, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  <trackablesChanged>k__BackingField:
+    m_PersistentCalls:
+      m_Calls: []
+  m_SerializedLibrary: {fileID: 11400000, guid: 1f511827dfe24e65a8e3c915d2d2cd17, type: 2}
+  m_MaxNumberOfMovingImages: 0
+  m_TrackedImagePrefab: {fileID: 0}
+--- !u!114 &672916556
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 672916548}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f8b6e4b4378f4fc5a65cbd457209b512, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  referenceImageName: BuildingReference
+  configuredImageWidthMeters: 0.42
+  cubeSizeMeters: 0.14
+  cubeColor: {r: 0.12, g: 0.74, b: 0.58, a: 1}
+  trackedImageManager: {fileID: 672916555}
+  anchorManager: {fileID: 672916550}
+  overlayCanvas: {fileID: 166363328}
+  statusText: {fileID: 384357991}
+  connectDroneButton: {fileID: 897550539}
+  resetButton: {fileID: 693552507}
+  debugLogging: 0
+  debugLogInterval: 1
 --- !u!114 &672916551
 MonoBehaviour:
   m_ObjectHideFlags: 0
