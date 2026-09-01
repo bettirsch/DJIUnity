@@ -50,12 +50,11 @@ public static class ReferenceImageTrackingSetup
         if (djiPoseDriver != null)
             djiPoseDriver.enabled = false;
 
-        var canvas = Object.FindFirstObjectByType<Canvas>(FindObjectsInactive.Include);
+        var canvas = GameObject.Find("AR Placement Canvas")?.GetComponent<Canvas>();
         var statusText = FindComponentByName<Text>("StatusText");
-        var connectButton = FindComponentByName<Button>("PlaceButton");
-        var resetButton = FindComponentByName<Button>("ResetButton");
+        var actionUi = ReferenceActionUi.FindOrCreate();
         var controller = GetOrAddComponent<ReferenceImageAnchorController>(origin.gameObject);
-        controller.Configure(trackedImageManager, anchorManager, canvas, statusText, connectButton, resetButton, TargetWidthMeters);
+        controller.Configure(trackedImageManager, anchorManager, canvas, statusText, actionUi, TargetWidthMeters);
         controller.enabled = true;
 
         EditorUtility.SetDirty(origin.gameObject);

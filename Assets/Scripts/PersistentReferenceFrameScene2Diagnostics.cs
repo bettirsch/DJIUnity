@@ -24,8 +24,10 @@ public sealed class PersistentReferenceFrameScene2Diagnostics : MonoBehaviour
 
     private void Start()
     {
-        if (!PersistentReferenceFrame.TryGetExisting(out var persistentReferenceFrame) ||
-            !persistentReferenceFrame.HasReferencePose)
+        var available = PersistentReferenceFrame.TryGetExisting(out var persistentReferenceFrame) &&
+                        persistentReferenceFrame.HasReferencePose;
+        Debug.Log($"PERSISTENT_REFERENCE_AVAILABLE={available}");
+        if (!available)
         {
             Debug.LogWarning("[Persistent Reference] PERSISTENT_REFERENCE_UNAVAILABLE scene=DroneView");
             return;

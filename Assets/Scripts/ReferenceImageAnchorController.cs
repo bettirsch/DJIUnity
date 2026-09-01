@@ -1,16 +1,10 @@
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
-#if ENABLE_INPUT_SYSTEM
-using UnityEngine.InputSystem;
-using UnityEngine.InputSystem.UI;
-#endif
 
 [DisallowMultipleComponent]
 [RequireComponent(typeof(ARTrackedImageManager))]
@@ -37,13 +31,11 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     [SerializeField] private ARAnchorManager anchorManager;
     [SerializeField] private Canvas overlayCanvas;
     [SerializeField] private Text statusText;
-    [SerializeField] private Button connectDroneButton;
-    [SerializeField] private Button resetButton;
+    [SerializeField] private ReferenceActionUi referenceActionUi;
 
     [Header("Diagnostics")]
     [SerializeField] private bool debugLogging = true;
     [SerializeField, Min(0.1f)] private float debugLogInterval = 1f;
-    [SerializeField] private bool uiPointerRaycastDiagnostics = true;
 
     private ScanState _state;
     private ARAnchor _anchor;
@@ -78,6 +70,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
         PreparePhoneCameraScanning();
         _ = PersistentReferenceFrame.Instance;
+        referenceActionUi ??= ReferenceActionUi.FindOrCreate();
         PrepareUi();
         SetState(ScanState.Searching, "Tartsa a referencia-képet a telefon kameraképében.");
     }
@@ -101,8 +94,6 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     private void Update()
     {
-        LogUiPointerRaycastAtPointerDown();
-
         if (!debugLogging || _anchor == null || Time.unscaledTime < _nextDebugLogTime)
             return;
 
@@ -135,8 +126,8 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         _targetReachedTracking = false;
         _anchorCreationFailed = false;
         _lastTrackingState = TrackingState.None;
-        SetConnectButtonVisible(false);
-        SetResetButtonVisible(false);
+        SetConnectDroneButtonVisible(false);
+        SetRescanButtonVisible(false);
         SetState(ScanState.Searching, "Tartsa a referencia-képet a telefon kameraképében.");
     }
 
@@ -145,16 +136,14 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         ARAnchorManager newAnchorManager,
         Canvas canvas,
         Text newStatusText,
-        Button newConnectDroneButton,
-        Button newResetButton,
+        ReferenceActionUi newReferenceActionUi,
         float physicalWidthMeters)
     {
         trackedImageManager = imageManager;
         anchorManager = newAnchorManager;
         overlayCanvas = canvas;
         statusText = newStatusText;
-        connectDroneButton = newConnectDroneButton;
-        resetButton = newResetButton;
+        referenceActionUi = newReferenceActionUi;
         configuredImageWidthMeters = physicalWidthMeters;
     }
 
@@ -223,9 +212,9 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             CreateContentHierarchy(_anchor.transform);
             Debug.Log($"[Reference Image] ANCHOR_CREATED position={_anchor.transform.position} rotation={_anchor.transform.rotation.eulerAngles}");
             AcquirePersistentReferenceFrame(_anchor.transform);
-            SetConnectButtonVisible(true);
-            SetResetButtonVisible(true);
-            LogUiConfiguration("REFERENCE_ACQUIRED");
+            SetConnectDroneButtonVisible(true);
+            SetRescanButtonVisible(true);
+            referenceActionUi?.LogConfiguration("REFERENCE_ACQUIRED");
             SetState(ScanState.Anchored, "Referencia-kép rögzítve. Csatlakoztassa a drónt.");
         }
         catch (Exception exception)
@@ -342,28 +331,17 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         if (overlayCanvas != null)
             overlayCanvas.gameObject.SetActive(true);
 
-        SetConnectButtonVisible(false);
-        SetResetButtonVisible(false);
-        EnsureUiEventSystem();
-        ConfigureUiRaycastTargets();
-        if (connectDroneButton != null)
-        {
-            connectDroneButton.onClick.RemoveAllListeners();
-            connectDroneButton.onClick.AddListener(OnConnectDroneClicked);
-            SetButtonLabel(connectDroneButton, "Csatlakoztassa a drónt");
-        }
-
-        if (resetButton != null)
-        {
-            resetButton.onClick.RemoveAllListeners();
-            resetButton.onClick.AddListener(ResetScan);
-            SetButtonLabel(resetButton, "Új keresés");
-        }
+        DisableOverlayRaycasts();
+        DisableLegacyActionButtons();
+        referenceActionUi ??= ReferenceActionUi.FindOrCreate();
+        referenceActionUi.Configure(OnConnectDroneClicked, ResetScan);
+        SetConnectDroneButtonVisible(false);
+        SetRescanButtonVisible(false);
 
         SetObjectActiveByName("Prototype Warning", false);
         SetObjectActiveByName("Center Reticle", false);
         SetObjectActiveByName("AR Placement Indicator", false);
-        LogUiConfiguration("STARTUP");
+        referenceActionUi.LogConfiguration("STARTUP");
     }
 
     private void LoadDroneView()
@@ -391,10 +369,28 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         SceneManager.LoadScene("DroneView");
     }
 
-    private void OnConnectDroneClicked()
+    public void OnConnectDroneClicked()
     {
-        Debug.Log("[Persistent Reference] CONNECT_DRONE_BUTTON_CLICKED source=UNITY_UI");
+        Debug.Log("CONNECT_DRONE_BUTTON_CLICKED");
         LoadDroneView();
+    }
+
+    [ContextMenu("Debug Load DroneView")]
+    public void DebugLoadDroneView()
+    {
+        var persistentReferenceFrame = PersistentReferenceFrame.Instance;
+        var loadable = Application.CanStreamedLevelBeLoaded("DroneView");
+        Debug.Log("DEBUG_DRONEVIEW_LOAD_REQUESTED");
+        Debug.Log($"PersistentReferenceFrame.HasReferencePose={persistentReferenceFrame.HasReferencePose}");
+        Debug.Log($"DroneViewLoadable={loadable}");
+        if (!loadable)
+        {
+            Debug.LogError("DRONEVIEW_NOT_LOADABLE");
+            return;
+        }
+
+        Debug.Log("SCENE_TRANSITION_LOGIC_CONFIRMED");
+        SceneManager.LoadScene("DroneView");
     }
 
     private void SetState(ScanState state, string status)
@@ -411,172 +407,34 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             statusText.text = status;
     }
 
-    private void SetConnectButtonVisible(bool visible)
+    private void SetConnectDroneButtonVisible(bool visible)
     {
-        if (connectDroneButton != null)
-            connectDroneButton.gameObject.SetActive(visible);
+        if (referenceActionUi != null)
+            referenceActionUi.SetConnectDroneVisible(visible);
     }
 
-    private void SetResetButtonVisible(bool visible)
+    private void SetRescanButtonVisible(bool visible)
     {
-        if (resetButton != null)
-            resetButton.gameObject.SetActive(visible);
+        if (referenceActionUi != null)
+            referenceActionUi.SetRescanReferenceVisible(visible);
     }
 
-    private void EnsureUiEventSystem()
-    {
-        if (overlayCanvas == null)
-            return;
-
-        var raycasters = overlayCanvas.GetComponents<GraphicRaycaster>();
-        if (raycasters.Length == 0)
-            raycasters = new[] { overlayCanvas.gameObject.AddComponent<GraphicRaycaster>() };
-
-        for (var index = 1; index < raycasters.Length; index++)
-        {
-            raycasters[index].enabled = false;
-            Destroy(raycasters[index]);
-        }
-
-        var eventSystem = EventSystem.current;
-        if (eventSystem == null)
-        {
-            var eventSystemObject = new GameObject("AR Scan EventSystem", typeof(EventSystem));
-            eventSystem = eventSystemObject.GetComponent<EventSystem>();
-        }
-
-#if ENABLE_INPUT_SYSTEM
-        var inputModule = eventSystem.GetComponent<InputSystemUIInputModule>();
-        if (inputModule == null)
-            inputModule = eventSystem.gameObject.AddComponent<InputSystemUIInputModule>();
-
-        foreach (var module in eventSystem.GetComponents<BaseInputModule>())
-        {
-            if (module == inputModule)
-                continue;
-
-            module.enabled = false;
-            Destroy(module);
-        }
-
-        var wasEnabled = inputModule.enabled;
-        inputModule.enabled = false;
-        inputModule.AssignDefaultActions();
-        inputModule.enabled = wasEnabled;
-#endif
-
-        var activeEventSystemCount = FindObjectsByType<EventSystem>(FindObjectsInactive.Exclude, FindObjectsSortMode.None).Length;
-        if (activeEventSystemCount != 1)
-            Debug.LogError($"[Reference Image] UI_EVENT_SYSTEM_INVALID activeEventSystems={activeEventSystemCount}");
-
-        LogUiEventSystem(eventSystem, activeEventSystemCount);
-    }
-
-    private void ConfigureUiRaycastTargets()
+    private void DisableOverlayRaycasts()
     {
         if (overlayCanvas == null)
             return;
 
         foreach (var graphic in overlayCanvas.GetComponentsInChildren<Graphic>(true))
-        {
-            var isButtonTarget =
-                (connectDroneButton != null && graphic == connectDroneButton.targetGraphic) ||
-                (resetButton != null && graphic == resetButton.targetGraphic);
-            graphic.raycastTarget = isButtonTarget;
-        }
+            graphic.raycastTarget = false;
+
+        foreach (var canvasGroup in overlayCanvas.GetComponentsInChildren<CanvasGroup>(true))
+            canvasGroup.blocksRaycasts = false;
     }
 
-    private void LogUiPointerRaycastAtPointerDown()
+    private static void DisableLegacyActionButtons()
     {
-#if ENABLE_INPUT_SYSTEM
-        if (!uiPointerRaycastDiagnostics || EventSystem.current == null || Touchscreen.current == null ||
-            !Touchscreen.current.primaryTouch.press.wasPressedThisFrame)
-            return;
-
-        var screenPosition = Touchscreen.current.primaryTouch.position.ReadValue();
-        var pointerData = new PointerEventData(EventSystem.current) { position = screenPosition };
-        var results = new List<RaycastResult>();
-        EventSystem.current.RaycastAll(pointerData, results);
-        Debug.Log($"[Reference Image] UI_POINTER_DOWN screen={screenPosition} raycastCount={results.Count}");
-        for (var index = 0; index < results.Count; index++)
-            Debug.Log($"[Reference Image] RAYCAST[{index}]={results[index].gameObject.name}");
-#endif
-    }
-
-    [ContextMenu("Debug Invoke Connect Drone Button")]
-    public void DebugInvokeConnectDroneButton()
-    {
-        if (connectDroneButton == null)
-        {
-            Debug.LogWarning("[Reference Image] DEBUG_CONNECT_INVOKE_FAILED reason=MISSING_BUTTON");
-            return;
-        }
-
-        Debug.Log("[Reference Image] DEBUG_CONNECT_INVOKE_REQUESTED");
-        connectDroneButton.onClick.Invoke();
-    }
-
-    private void LogUiConfiguration(string phase)
-    {
-        if (overlayCanvas == null)
-            return;
-
-        Canvas.ForceUpdateCanvases();
-        var canvasTransform = overlayCanvas.transform as RectTransform;
-        var raycasterCount = overlayCanvas.GetComponents<GraphicRaycaster>().Length;
-        Debug.Log(
-            $"[Reference Image] UI_CANVAS phase={phase} active={overlayCanvas.gameObject.activeInHierarchy} " +
-            $"enabled={overlayCanvas.enabled} renderMode={overlayCanvas.renderMode} scaleFactor={overlayCanvas.scaleFactor:F3} " +
-            $"raycasterCount={raycasterCount} localScale={canvasTransform?.localScale}");
-        LogUiButtonConfiguration(phase, connectDroneButton);
-        LogUiButtonConfiguration(phase, resetButton);
-    }
-
-    private void LogUiEventSystem(EventSystem eventSystem, int activeEventSystemCount)
-    {
-        var inputModule = eventSystem.currentInputModule;
-        var selected = eventSystem.currentSelectedGameObject;
-        var selectedName = selected != null ? selected.name : "none";
-        Debug.Log(
-            $"[Reference Image] UI_EVENT_SYSTEM_OK object={eventSystem.gameObject.name} " +
-            $"inputModule={inputModule?.GetType().Name} activeEventSystems={activeEventSystemCount} " +
-            $"selected={selectedName}");
-    }
-
-    private void LogUiButtonConfiguration(string phase, Button button)
-    {
-        if (button == null)
-        {
-            Debug.LogWarning($"[Reference Image] UI_BUTTON phase={phase} missing=true");
-            return;
-        }
-
-        var rectTransform = button.transform as RectTransform;
-        var corners = new Vector3[4];
-        rectTransform.GetWorldCorners(corners);
-        var min = RectTransformUtility.WorldToScreenPoint(null, corners[0]);
-        var max = min;
-        for (var index = 1; index < corners.Length; index++)
-        {
-            var screenPoint = RectTransformUtility.WorldToScreenPoint(null, corners[index]);
-            min = Vector2.Min(min, screenPoint);
-            max = Vector2.Max(max, screenPoint);
-        }
-
-        var targetGraphic = button.targetGraphic;
-        Debug.Log(
-            $"[Reference Image] UI_BUTTON phase={phase} name={button.gameObject.name} active={button.gameObject.activeInHierarchy} " +
-            $"interactable={button.interactable} anchors={rectTransform.anchorMin}/{rectTransform.anchorMax} " +
-            $"pivot={rectTransform.pivot} localScale={rectTransform.localScale} sizeDelta={rectTransform.sizeDelta} " +
-            $"worldCorners={corners[0]};{corners[1]};{corners[2]};{corners[3]} " +
-            $"screenRect={Rect.MinMaxRect(min.x, min.y, max.x, max.y)} targetRaycast={targetGraphic != null && targetGraphic.raycastTarget}");
-    }
-
-    private static void SetButtonLabel(Button button, string text)
-    {
-        var label = button.GetComponentInChildren<Text>(true);
-        if (label != null)
-            label.text = text;
+        SetObjectActiveByName("PlaceButton", false);
+        SetObjectActiveByName("ResetButton", false);
     }
 
     private static void SetObjectActiveByName(string objectName, bool active)

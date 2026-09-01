@@ -10,6 +10,8 @@ internal static class DJIDroneViewBootstrap
         if (SceneManager.GetActiveScene().name != "DroneView")
             return;
 
+        Debug.Log("DRONEVIEW_SCENE_STARTED");
+
         foreach (var canvas in Object.FindObjectsByType<Canvas>(FindObjectsInactive.Include, FindObjectsSortMode.None))
             canvas.gameObject.SetActive(false);
 
