@@ -144,7 +144,9 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
             navigationFromAircraftRotation);
         NavigationFromAircraft = DjiNavigationFrameTransforms.NavigationFromAircraft(navigationFromAircraft);
 
-        var aircraftFromGimbalRotation = BuildAircraftFromGimbalRotation(snapshot, navigationFromAircraftRotation);
+        var navigationFromGimbalRotation = BuildNavigationFromGimbalRotation(snapshot);
+        var aircraftFromGimbalRotation = Quaternion.Normalize(
+            Quaternion.Inverse(navigationFromAircraftRotation) * navigationFromGimbalRotation);
         AircraftFromGimbal = DjiNavigationFrameTransforms.AircraftFromGimbal(
             new Pose(Vector3.zero, aircraftFromGimbalRotation));
         _navigationFromCamera = DjiNavigationFrameTransforms.NavigationFromCamera(
@@ -152,31 +154,24 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
             AircraftFromGimbal,
             GimbalFromCamera);
 
-        LogDiagnostics(snapshot, navigationFromAircraftRotation, aircraftFromGimbalRotation);
+        LogDiagnostics(
+            snapshot,
+            navigationFromAircraftRotation,
+            aircraftFromGimbalRotation,
+            navigationFromGimbalRotation);
         LogSeparateReferenceFrameOnce();
     }
 
-    private Quaternion BuildAircraftFromGimbalRotation(
-        DJIPoseSnapshot snapshot,
-        Quaternion navigationFromAircraftRotation)
+    private static Quaternion BuildNavigationFromGimbalRotation(DJIPoseSnapshot snapshot)
     {
-        // DJI supplies an explicit gimbal yaw relative to aircraft heading. It
-        // lets us keep the dynamic gimbal rotation in the aircraft frame.
-        if (snapshot.gimbal.hasYawRelativeToAircraftHeading)
-        {
-            return DjiNavigationFrameTransforms.RotationFromDjiNedAttitudeDegrees(
-                (float)snapshot.gimbal.pitch,
-                (float)snapshot.gimbal.roll,
-                (float)snapshot.gimbal.yawRelativeToAircraftHeading);
-        }
-
-        // The MSDK documents KeyGimbalAttitude yaw in NED. Convert that
-        // absolute gimbal orientation back into the aircraft frame once.
-        var navigationFromGimbalRotation = DjiNavigationFrameTransforms.RotationFromDjiNedAttitudeDegrees(
+        // The physical-device telemetry shows that KeyGimbalAttitude remains
+        // near level while aircraft pitch/roll change. Treat the complete
+        // attitude as navigation-frame orientation. The separate relative-yaw
+        // key is retained only as a diagnostic cross-check, never composed.
+        return DjiNavigationFrameTransforms.RotationFromDjiNedAttitudeDegrees(
             (float)snapshot.gimbal.pitch,
             (float)snapshot.gimbal.roll,
             (float)snapshot.gimbal.yaw);
-        return Quaternion.Normalize(Quaternion.Inverse(navigationFromAircraftRotation) * navigationFromGimbalRotation);
     }
 
     private Vector3 CalculateNavigationFromAircraftPosition(DJIPoseSnapshot.AircraftPose aircraft)
@@ -194,14 +189,20 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
     private void LogDiagnostics(
         DJIPoseSnapshot snapshot,
         Quaternion navigationFromAircraftRotation,
-        Quaternion aircraftFromGimbalRotation)
+        Quaternion aircraftFromGimbalRotation,
+        Quaternion navigationFromGimbalRotation)
     {
         if (!diagnosticLogging || Time.unscaledTime < _nextDiagnosticLogTime)
             return;
 
         _nextDiagnosticLogTime = Time.unscaledTime + diagnosticLogIntervalSeconds;
         var cameraPose = CurrentNavigationCameraPose;
-        var navigationFromGimbalRotation = Quaternion.Normalize(navigationFromAircraftRotation * aircraftFromGimbalRotation);
+        var gimbalYawMinusAircraftDegrees = Mathf.DeltaAngle(
+            (float)snapshot.aircraft.yaw,
+            (float)snapshot.gimbal.yaw);
+        var relativeYawErrorDegrees = snapshot.gimbal.hasYawRelativeToAircraftHeading
+            ? Mathf.DeltaAngle((float)snapshot.gimbal.yawRelativeToAircraftHeading, gimbalYawMinusAircraftDegrees)
+            : float.NaN;
         Debug.Log(
             $"DJI_POSE_RAW aircraftPitchDeg={snapshot.aircraft.pitch:F2} aircraftRollDeg={snapshot.aircraft.roll:F2} aircraftYawDeg={snapshot.aircraft.yaw:F2} " +
             $"gimbalPitchDeg={snapshot.gimbal.pitch:F2} gimbalRollDeg={snapshot.gimbal.roll:F2} gimbalYawDeg={snapshot.gimbal.yaw:F2} " +
@@ -212,7 +213,8 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
             $"positionNedMeters={(HasTelemetryPosition ? FormatVector(NavigationFromAircraft.GetColumn(3)) : "UNAVAILABLE")}");
         Debug.Log(
             $"DJI_GIMBAL_ROTATION aircraftFromGimbal={FormatQuaternion(aircraftFromGimbalRotation)} " +
-            $"navigationFromGimbal={FormatQuaternion(navigationFromGimbalRotation)} yawSource={(snapshot.gimbal.hasYawRelativeToAircraftHeading ? "RELATIVE_TO_AIRCRAFT" : "NED_ABSOLUTE_FALLBACK")}");
+            $"navigationFromGimbal={FormatQuaternion(navigationFromGimbalRotation)} gimbalYawMinusAircraftDeg={gimbalYawMinusAircraftDegrees:F2} " +
+            $"relativeYawErrorDeg={relativeYawErrorDegrees:F2} yawSource=NED_ABSOLUTE_VALIDATED_BY_RELATIVE_YAW");
         Debug.Log(
             $"DJI_CAMERA_FORWARD navigationFromCamera={FormatQuaternion(cameraPose.rotation)} " +
             $"forwardNed={FormatVector(CameraForwardInNavigation)} upNed={FormatVector(CameraUpInNavigation)} rightNed={FormatVector(CameraRightInNavigation)} " +
