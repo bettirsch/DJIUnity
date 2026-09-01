@@ -102,7 +102,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     private void Update()
     {
         LogInputStatusOnce();
-        DetectConnectDroneFallbackTap();
+        DetectBottomActionFallbackTap();
 
         if (!debugLogging || _anchor == null || Time.unscaledTime < _nextDebugLogTime)
             return;
@@ -471,7 +471,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             graphic.raycastTarget = false;
     }
 
-    private void DetectConnectDroneFallbackTap()
+    private void DetectBottomActionFallbackTap()
     {
         if (!TryGetPointerState(out var isPressed, out var screenPosition))
             return;
@@ -482,65 +482,60 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             return;
 
         Debug.Log($"[Persistent Reference] TOUCH_INPUT_OBSERVED position={screenPosition}");
-        if (_sceneTransitionInProgress || connectDroneButton == null ||
-            !connectDroneButton.gameObject.activeInHierarchy || !connectDroneButton.interactable)
+
+        if (TryHitBottomButton(connectDroneButton, screenPosition, out var connectScreenRect))
         {
+            Debug.Log($"[Persistent Reference] CONNECT_DRONE_BUTTON_CLICKED source=TOUCH_FALLBACK rect={connectScreenRect}");
+            LoadDroneView();
             return;
         }
 
-        var buttonRect = connectDroneButton.transform as RectTransform;
-        var eventCamera = overlayCanvas != null && overlayCanvas.renderMode != RenderMode.ScreenSpaceOverlay
-            ? overlayCanvas.worldCamera
-            : null;
-        if (!TryGetButtonScreenRect(buttonRect, eventCamera, out var buttonScreenRect))
-            return;
-
-        // RectTransformUtility returned false for valid Android touches after the canvas had rendered.
-        // Compare the touch against the actual screen-space button corners instead.
-        const float touchHitPaddingPixels = 24f;
-        var paddedButtonScreenRect = ExpandRect(buttonScreenRect, touchHitPaddingPixels);
-        var hitButton = paddedButtonScreenRect.Contains(screenPosition);
-        Debug.Log(
-            $"[Persistent Reference] CONNECT_DRONE_HIT_TEST touch={screenPosition} " +
-            $"buttonRect={buttonScreenRect} paddedRect={paddedButtonScreenRect} hit={hitButton} " +
-            $"screen={Screen.width}x{Screen.height} orientation={Screen.orientation}");
-        if (!hitButton)
-            return;
-
-        Debug.Log("[Persistent Reference] CONNECT_DRONE_BUTTON_CLICKED source=TOUCH_FALLBACK");
-        LoadDroneView();
+        if (TryHitBottomButton(resetButton, screenPosition, out var resetScreenRect))
+        {
+            Debug.Log($"[Reference Image] RESET_BUTTON_CLICKED source=TOUCH_FALLBACK rect={resetScreenRect}");
+            ResetScan();
+        }
     }
 
-    private static bool TryGetButtonScreenRect(RectTransform buttonRect, Camera eventCamera, out Rect screenRect)
+    private bool TryHitBottomButton(Button button, Vector2 screenPosition, out Rect screenRect)
     {
         screenRect = default;
-        if (buttonRect == null)
+        if (button == null || !button.gameObject.activeInHierarchy || !button.interactable ||
+            !TryGetOverlayButtonScreenRect(button.transform as RectTransform, out screenRect))
             return false;
 
-        Canvas.ForceUpdateCanvases();
-        var corners = new Vector3[4];
-        buttonRect.GetWorldCorners(corners);
+        const float touchHitPaddingPixels = 32f;
+        return ExpandRect(screenRect, touchHitPaddingPixels).Contains(screenPosition);
+    }
 
-        var min = RectTransformUtility.WorldToScreenPoint(eventCamera, corners[0]);
-        var max = min;
-        for (var index = 1; index < corners.Length; index++)
-        {
-            var screenPoint = RectTransformUtility.WorldToScreenPoint(eventCamera, corners[index]);
-            min = Vector2.Min(min, screenPoint);
-            max = Vector2.Max(max, screenPoint);
-        }
+    private bool TryGetOverlayButtonScreenRect(RectTransform buttonRect, out Rect screenRect)
+    {
+        screenRect = default;
+        if (overlayCanvas == null || overlayCanvas.renderMode != RenderMode.ScreenSpaceOverlay || buttonRect == null)
+            return false;
 
-        screenRect = Rect.MinMaxRect(min.x, min.y, max.x, max.y);
+        var buttonGroup = buttonRect.parent as RectTransform;
+        if (buttonGroup == null)
+            return false;
+
+        // Screen-space Canvas rendering ignores its transform scale, but Android UI raycasts do not.
+        // Calculate the button rect directly from its serialized Canvas layout and scale factor.
+        var canvasScale = Mathf.Max(overlayCanvas.scaleFactor, 0.0001f);
+        var canvasSize = new Vector2(Screen.width / canvasScale, Screen.height / canvasScale);
+        var groupAnchor = (buttonGroup.anchorMin + buttonGroup.anchorMax) * 0.5f;
+        var groupCenter = Vector2.Scale(canvasSize, groupAnchor) + buttonGroup.anchoredPosition;
+        var buttonAnchor = Vector2.Scale(buttonGroup.rect.size, (buttonRect.anchorMin + buttonRect.anchorMax) * 0.5f - Vector2.one * 0.5f);
+        var buttonCenter = groupCenter + buttonAnchor + buttonRect.anchoredPosition;
+        var buttonSize = Vector2.Scale(buttonRect.rect.size, Vector2.one * canvasScale);
+        var screenCenter = buttonCenter * canvasScale;
+
+        screenRect = new Rect(screenCenter - buttonSize * 0.5f, buttonSize);
         return screenRect.width > 0f && screenRect.height > 0f;
     }
 
     private static Rect ExpandRect(Rect rect, float padding)
     {
-        return Rect.MinMaxRect(
-            rect.xMin - padding,
-            rect.yMin - padding,
-            rect.xMax + padding,
-            rect.yMax + padding);
+        return Rect.MinMaxRect(rect.xMin - padding, rect.yMin - padding, rect.xMax + padding, rect.yMax + padding);
     }
 
     private static bool TryGetPointerState(out bool isPressed, out Vector2 screenPosition)
