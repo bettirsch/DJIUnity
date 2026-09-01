@@ -494,6 +494,23 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         {
             Debug.Log($"[Reference Image] RESET_BUTTON_CLICKED source=TOUCH_FALLBACK rect={resetScreenRect}");
             ResetScan();
+            return;
+        }
+
+        // The phone reports correct touch coordinates, but this project's screen-space Canvas
+        // has a zero-sized geometry for raycasts. Keep the visible lower action bar usable by
+        // routing its left and right touch zones without depending on that broken geometry.
+        if (TryGetBottomActionTouchZone(isConnectAction: true, out var connectTouchZone) && connectTouchZone.Contains(screenPosition))
+        {
+            Debug.Log($"[Persistent Reference] CONNECT_DRONE_BUTTON_CLICKED source=TOUCH_ZONE rect={connectTouchZone}");
+            LoadDroneView();
+            return;
+        }
+
+        if (TryGetBottomActionTouchZone(isConnectAction: false, out var resetTouchZone) && resetTouchZone.Contains(screenPosition))
+        {
+            Debug.Log($"[Reference Image] RESET_BUTTON_CLICKED source=TOUCH_ZONE rect={resetTouchZone}");
+            ResetScan();
         }
     }
 
@@ -531,6 +548,21 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
         screenRect = new Rect(screenCenter - buttonSize * 0.5f, buttonSize);
         return screenRect.width > 0f && screenRect.height > 0f;
+    }
+
+    private bool TryGetBottomActionTouchZone(bool isConnectAction, out Rect touchZone)
+    {
+        touchZone = default;
+        var button = isConnectAction ? connectDroneButton : resetButton;
+        if (button == null || !button.gameObject.activeInHierarchy || !button.interactable)
+            return false;
+
+        var actionBandHeight = Screen.height * 0.3f;
+        var halfScreenWidth = Screen.width * 0.5f;
+        touchZone = isConnectAction
+            ? new Rect(Screen.width * 0.25f, 0f, halfScreenWidth - Screen.width * 0.25f, actionBandHeight)
+            : new Rect(halfScreenWidth, 0f, Screen.width * 0.25f, actionBandHeight);
+        return true;
     }
 
     private static Rect ExpandRect(Rect rect, float padding)
