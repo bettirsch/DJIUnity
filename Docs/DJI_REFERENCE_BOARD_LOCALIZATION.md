@@ -24,13 +24,14 @@ uses the official AprilRobotics AprilTag library, detects all configured tags,
 and performs one robust reprojection refinement across all visible marker
 corners. It does not average individual marker rotations.
 
-`DjiCameraCalibration.json` must be replaced with intrinsics calibrated for
-the exact ImageReader frame mode before world-pose initialization is enabled.
-The committed file intentionally uses zero intrinsics and is marked
-`provisional`; that configuration permits marker diagnostics only. CPU frames
-are currently expected to be uncropped, unrotated, and unmirrored 1920x1080.
-If the decoder output differs, update the calibration and frame-transform
-handling together rather than changing pose axes heuristically.
+`DjiCameraCalibration.json` must be generated from raw ImageReader luma frames
+before world-pose initialization is enabled. The committed file intentionally
+uses zero intrinsics and is marked `provisional`; that configuration permits
+marker diagnostics only. The full capture, printable checkerboard, offline
+solve, frame-level errors, and runtime geometry checks are documented in
+`Docs/DjiCameraCalibration/README.md`. CPU frames are currently expected to be
+uncropped, unrotated, and unmirrored 1920x1080. If the delivered frame differs,
+calibrate the exact new geometry instead of changing pose axes heuristically.
 
 The transform convention is parent-from-child. Once a quality-gated visual
 measurement provides `T_camera_board`, DJI visual localization computes:

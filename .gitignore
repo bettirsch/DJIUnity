@@ -66,6 +66,8 @@ desktop.ini
 *.tmp
 *.bak
 *.swp
+__pycache__/
+*.pyc
 
 # =========================
 # Crash reports

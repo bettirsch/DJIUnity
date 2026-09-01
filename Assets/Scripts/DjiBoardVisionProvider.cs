@@ -56,6 +56,7 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         public int frameHeight;
         public long timestampNs;
         public int frameSequence;
+        public string detectorFrameFormat;
         public bool calibrationUsable;
         public int status;
         public int markerCount;
@@ -140,6 +141,7 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
             data.fy,
             data.cx,
             data.cy,
+            _calibration.DistortionCoefficients,
             layout,
             100);
         Debug.Log(
@@ -178,9 +180,9 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
             return;
         }
 
-        if (!_calibration.HasUsableCalibration || !result.calibrationUsable)
+        if (!_calibration.IsRuntimeFrameCompatible(result.frameWidth, result.frameHeight, result.detectorFrameFormat) || !result.calibrationUsable)
         {
-            Reject("CALIBRATION_UNUSABLE");
+            Reject($"CALIBRATION_UNUSABLE_OR_FRAME_MISMATCH runtime={result.frameWidth}x{result.frameHeight}/{result.detectorFrameFormat} calibrated={_calibration.Current.imageWidth}x{_calibration.Current.imageHeight}/{_calibration.Current.detectorFrameFormat}");
             return;
         }
 
@@ -205,6 +207,7 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         var candidateWorldPose = ReferenceFrameTransforms.PoseFromMatrix(worldFromCamera);
         Debug.Log($"DJI_BOARD_POSE_ESTIMATED T_CAMERA_BOARD position={cameraFromBoard.position} rotation={cameraFromBoard.rotation.eulerAngles}");
         Debug.Log($"DJI_BOARD_REPROJECTION_RMS rmsPixels={result.reprojectionRms:F3} maxResidualPixels={result.maxResidual:F3} corners={result.cornerCount}");
+        Debug.Log($"DJI_BOARD_MAX_CORNER_ERROR pixels={result.maxResidual:F3}");
 
         if (!PassesImageQuality(result))
         {
@@ -359,9 +362,13 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         if (cameraPoint.z <= 0.0001f)
             return new Vector2(float.NaN, float.NaN);
         var data = _calibration.Current;
-        return new Vector2(
-            data.fx * cameraPoint.x / cameraPoint.z + data.cx,
-            data.fy * cameraPoint.y / cameraPoint.z + data.cy);
+        var x = cameraPoint.x / cameraPoint.z;
+        var y = cameraPoint.y / cameraPoint.z;
+        var r2 = x * x + y * y;
+        var radial = 1f + data.k1 * r2 + data.k2 * r2 * r2 + data.k3 * r2 * r2 * r2;
+        var distortedX = x * radial + 2f * data.p1 * x * y + data.p2 * (r2 + 2f * x * x);
+        var distortedY = y * radial + data.p1 * (r2 + 2f * y * y) + 2f * data.p2 * x * y;
+        return new Vector2(data.fx * distortedX + data.cx, data.fy * distortedY + data.cy);
     }
 
     private void DrawPixelQuad(float[][] corners, NativeBoardResult result, Color color)
@@ -403,6 +410,17 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         texture.Apply();
         return texture;
     }
+
+    /// <summary>Starts a bounded raw-luma capture from the actual detector path.</summary>
+    public string RequestCalibrationCapture(int frameCount = 30)
+    {
+        var path = DjiBoardVisionBridge.RequestCalibrationCapture(frameCount);
+        if (string.IsNullOrWhiteSpace(path))
+            Debug.LogWarning("DJI_CALIBRATION_CAPTURE_REQUEST_FAILED");
+        else
+            Debug.Log($"DJI_CALIBRATION_CAPTURE_REQUESTED frames={frameCount} path={path}");
+        return path;
+    }
 }
 
 internal static class DjiBoardVisionBridge
@@ -412,11 +430,11 @@ internal static class DjiBoardVisionBridge
     private const string VisionClass = "com.sok9hu.djibridge.DjiBoardVisionBridge";
 #endif
 
-    public static void Configure(int width, int height, float fx, float fy, float cx, float cy, float[] layout, int intervalMs)
+    public static void Configure(int width, int height, float fx, float fy, float cx, float cy, float[] distortionCoefficients, float[] layout, int intervalMs)
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
         using var bridge = new AndroidJavaClass(VisionClass);
-        bridge.CallStatic("configure", width, height, fx, fy, cx, cy, layout, intervalMs);
+        bridge.CallStatic("configure", width, height, fx, fy, cx, cy, distortionCoefficients, layout, intervalMs);
 #endif
     }
 
@@ -443,6 +461,16 @@ internal static class DjiBoardVisionBridge
 #if UNITY_ANDROID && !UNITY_EDITOR
         using var bridge = new AndroidJavaClass(BridgeClass);
         return bridge.CallStatic<string>("getLatestBoardVisionJson");
+#else
+        return string.Empty;
+#endif
+    }
+
+    public static string RequestCalibrationCapture(int frameCount)
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        using var bridge = new AndroidJavaClass(BridgeClass);
+        return bridge.CallStatic<string>("requestBoardCalibrationCapture", frameCount);
 #else
         return string.Empty;
 #endif
