@@ -477,11 +477,55 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         var eventCamera = overlayCanvas != null && overlayCanvas.renderMode != RenderMode.ScreenSpaceOverlay
             ? overlayCanvas.worldCamera
             : null;
-        if (!RectTransformUtility.RectangleContainsScreenPoint(buttonRect, screenPosition, eventCamera))
+        if (!TryGetButtonScreenRect(buttonRect, eventCamera, out var buttonScreenRect))
+            return;
+
+        // RectTransformUtility returned false for valid Android touches after the canvas had rendered.
+        // Compare the touch against the actual screen-space button corners instead.
+        const float touchHitPaddingPixels = 24f;
+        var paddedButtonScreenRect = ExpandRect(buttonScreenRect, touchHitPaddingPixels);
+        var hitButton = paddedButtonScreenRect.Contains(screenPosition);
+        Debug.Log(
+            $"[Persistent Reference] CONNECT_DRONE_HIT_TEST touch={screenPosition} " +
+            $"buttonRect={buttonScreenRect} paddedRect={paddedButtonScreenRect} hit={hitButton} " +
+            $"screen={Screen.width}x{Screen.height} orientation={Screen.orientation}");
+        if (!hitButton)
             return;
 
         Debug.Log("[Persistent Reference] CONNECT_DRONE_BUTTON_CLICKED source=TOUCH_FALLBACK");
         LoadDroneView();
+    }
+
+    private static bool TryGetButtonScreenRect(RectTransform buttonRect, Camera eventCamera, out Rect screenRect)
+    {
+        screenRect = default;
+        if (buttonRect == null)
+            return false;
+
+        Canvas.ForceUpdateCanvases();
+        var corners = new Vector3[4];
+        buttonRect.GetWorldCorners(corners);
+
+        var min = RectTransformUtility.WorldToScreenPoint(eventCamera, corners[0]);
+        var max = min;
+        for (var index = 1; index < corners.Length; index++)
+        {
+            var screenPoint = RectTransformUtility.WorldToScreenPoint(eventCamera, corners[index]);
+            min = Vector2.Min(min, screenPoint);
+            max = Vector2.Max(max, screenPoint);
+        }
+
+        screenRect = Rect.MinMaxRect(min.x, min.y, max.x, max.y);
+        return screenRect.width > 0f && screenRect.height > 0f;
+    }
+
+    private static Rect ExpandRect(Rect rect, float padding)
+    {
+        return Rect.MinMaxRect(
+            rect.xMin - padding,
+            rect.yMin - padding,
+            rect.xMax + padding,
+            rect.yMax + padding);
     }
 
     private static bool TryGetPointerState(out bool isPressed, out Vector2 screenPosition)
