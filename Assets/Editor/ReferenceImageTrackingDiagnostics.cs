@@ -12,7 +12,7 @@ public static class ReferenceImageTrackingDiagnostics
     private const string LibraryPath = "Assets/AR/ReferenceImages/BuildingReferenceImageLibrary.asset";
     private const string TargetTexturePath = "Assets/AR/ReferenceImages/BuildingReference.png";
     private const string TargetName = "BuildingReference";
-    private const float ExpectedWidthMeters = 0.16f;
+    private const float ExpectedWidthMeters = ReferenceBoardDefinition.PhysicalWidthMeters;
 
     [MenuItem("Tools/DJI/Validate Reference Image Tracking Setup")]
     public static void Validate()
@@ -41,7 +41,7 @@ public static class ReferenceImageTrackingDiagnostics
             }
         }
 
-        Debug.Log($"[Reference Image] EDITOR_LIBRARY_RESULT buildingReferenceExists={targetFound} referencedTextureMatchesGeneratedPng={textureMatches} physicalWidthIs160mm={physicalWidthMatches}");
+        Debug.Log($"[Reference Image] EDITOR_LIBRARY_RESULT buildingReferenceExists={targetFound} referencedTextureMatchesGeneratedPng={textureMatches} physicalWidthIs180mm={physicalWidthMatches}");
 
         var scene = EditorSceneManager.OpenScene(SampleScenePath, OpenSceneMode.Single);
         var origins = Object.FindObjectsByType<XROrigin>(FindObjectsInactive.Include, FindObjectsSortMode.None);

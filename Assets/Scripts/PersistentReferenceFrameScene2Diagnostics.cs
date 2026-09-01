@@ -8,7 +8,7 @@ public static class PersistentReferenceFrameScene2Diagnostics
     public static void LogForDroneView()
     {
         var available = PersistentReferenceFrame.TryGetExisting(out var persistentReferenceFrame) &&
-                        persistentReferenceFrame.HasReferencePose;
+                        persistentReferenceFrame.HasBoardPose;
         Debug.Log($"PERSISTENT_REFERENCE_AVAILABLE={available}");
         if (!available)
         {
@@ -16,8 +16,9 @@ public static class PersistentReferenceFrameScene2Diagnostics
             return;
         }
 
-        var worldFromReference = persistentReferenceFrame.ReferenceWorldPose;
-        Debug.Log($"REFERENCE_WORLD_POSITION={worldFromReference.position}");
-        Debug.Log($"REFERENCE_WORLD_ROTATION={worldFromReference.rotation.eulerAngles}");
+        var worldFromBoard = persistentReferenceFrame.BoardWorldPose;
+        Debug.Log($"T_WORLD_BOARD position={worldFromBoard.position} rotation={worldFromBoard.rotation.eulerAngles}");
+        Debug.Log($"REFERENCE_WORLD_POSITION={worldFromBoard.position}");
+        Debug.Log($"REFERENCE_WORLD_ROTATION={worldFromBoard.rotation.eulerAngles}");
     }
 }

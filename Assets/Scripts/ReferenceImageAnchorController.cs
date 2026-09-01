@@ -19,8 +19,6 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     }
 
     [Header("Reference image")]
-    [SerializeField] private string referenceImageName = "BuildingReference";
-    [SerializeField, Min(0.01f)] private float configuredImageWidthMeters = 0.16f;
 
     [Header("Content")]
     [SerializeField, Min(0.01f)] private float cubeSizeMeters = 0.14f;
@@ -53,8 +51,8 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     public ARTrackedImageManager ConfiguredTrackedImageManager => trackedImageManager;
     public ARAnchorManager ConfiguredAnchorManager => anchorManager;
-    public string TargetReferenceImageName => referenceImageName;
-    public float ConfiguredImageWidthMeters => configuredImageWidthMeters;
+    public string TargetReferenceImageName => ReferenceBoardDefinition.BuildingReferenceImageName;
+    public float ConfiguredImageWidthMeters => ReferenceBoardDefinition.Default.WidthMeters;
 
     private void Awake()
     {
@@ -136,15 +134,13 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         ARAnchorManager newAnchorManager,
         Canvas canvas,
         Text newStatusText,
-        ReferenceActionUi newReferenceActionUi,
-        float physicalWidthMeters)
+        ReferenceActionUi newReferenceActionUi)
     {
         trackedImageManager = imageManager;
         anchorManager = newAnchorManager;
         overlayCanvas = canvas;
         statusText = newStatusText;
         referenceActionUi = newReferenceActionUi;
-        configuredImageWidthMeters = physicalWidthMeters;
     }
 
     private void OnTrackablesChanged(ARTrackablesChangedEventArgs<ARTrackedImage> changes)
@@ -297,7 +293,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     private bool IsConfiguredReferenceImage(ARTrackedImage trackedImage)
     {
-        return trackedImage != null && trackedImage.referenceImage.name == referenceImageName;
+        return trackedImage != null && ReferenceBoardDefinition.Default.MatchesPhoneReferenceImage(trackedImage.referenceImage.name);
     }
 
     private void PreparePhoneCameraScanning()
@@ -349,7 +345,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         if (_sceneTransitionInProgress)
             return;
 
-        if (!PersistentReferenceFrame.Instance.HasReferencePose)
+        if (!PersistentReferenceFrame.Instance.HasBoardPose)
         {
             Debug.LogWarning("[Persistent Reference] SCENE_TRANSITION_BLOCKED_NO_REFERENCE");
             SetStatus("A referencia-kép rögzítése szükséges a drónnézet megnyitásához.");
@@ -382,7 +378,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         var persistentReferenceFrame = PersistentReferenceFrame.Instance;
         var loadable = Application.CanStreamedLevelBeLoaded("DroneView");
         Debug.Log("DEBUG_DRONEVIEW_LOAD_REQUESTED");
-        Debug.Log($"PersistentReferenceFrame.HasReferencePose={persistentReferenceFrame.HasReferencePose}");
+        Debug.Log($"PersistentReferenceFrame.HasBoardPose={persistentReferenceFrame.HasBoardPose}");
         Debug.Log($"DroneViewLoadable={loadable}");
         if (!loadable)
         {
@@ -399,7 +395,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         _state = state;
         SetStatus(status);
         if (debugLogging)
-            Debug.Log($"[Reference Image] State={state} configuredWidthMeters={configuredImageWidthMeters:F3}");
+            Debug.Log($"[Reference Image] State={state} configuredWidthMeters={ConfiguredImageWidthMeters:F3}");
     }
 
     private void SetStatus(string status)
@@ -460,29 +456,37 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     private void AcquirePersistentReferenceFrame(Transform worldFromTrackedImage)
     {
         var persistentReferenceFrame = PersistentReferenceFrame.Instance;
-        if (persistentReferenceFrame.HasReferencePose)
+        if (persistentReferenceFrame.HasBoardPose)
         {
             Debug.Log("[Persistent Reference] REFERENCE_FRAME_ALREADY_ACQUIRED preservingExistingPose=true");
             return;
         }
 
-        var worldFromReference = ConvertTrackedImagePoseToReferencePose(worldFromTrackedImage);
-        persistentReferenceFrame.SetReferencePose(worldFromReference);
+        var boardDefinition = ReferenceBoardDefinition.Default;
+        var worldFromBoard = ReferenceFrameTransforms.CalculateWorldFromBoard(
+            new Pose(worldFromTrackedImage.position, worldFromTrackedImage.rotation),
+            boardDefinition);
+        persistentReferenceFrame.SetWorldFromBoard(worldFromBoard);
+        var validRoundTrip = ReferenceFrameTransforms.ValidateWorldBoardRoundTrip(worldFromBoard, out var validation);
         Debug.Log(
-            $"[Persistent Reference] REFERENCE_FRAME_ACQUIRED " +
-            $"position={worldFromReference.position} rotation={worldFromReference.rotation.eulerAngles}");
+            $"[Persistent Reference] REFERENCE_FRAME_ACQUIRED T_WORLD_BOARD " +
+            $"position={worldFromBoard.position} rotation={worldFromBoard.rotation.eulerAngles} " +
+            $"widthMeters={boardDefinition.WidthMeters:F3} heightMeters={boardDefinition.HeightMeters:F3}");
+        Debug.Log($"[Persistent Reference] TRANSFORM_ROUND_TRIP {validation}");
+        if (!validRoundTrip)
+            Debug.LogError("[Persistent Reference] TRANSFORM_ROUND_TRIP_FAILED");
+
+        DrawBoardAxes(worldFromBoard, 15f);
     }
 
-    private static Pose ConvertTrackedImagePoseToReferencePose(Transform worldFromTrackedImage)
+    private static void DrawBoardAxes(Pose worldFromBoard, float durationSeconds)
     {
-        // ARTrackedImage uses +X right, +Y image-plane normal, and +Z opposite board-up.
-        // Convert it once to the documented reference board axes: +X right, +Y board-up, +Z outward.
-        var worldReferenceRight = worldFromTrackedImage.right;
-        var worldReferenceUp = -worldFromTrackedImage.forward;
-        var worldReferenceForward = worldFromTrackedImage.up;
-        var worldReferenceRotation = Quaternion.LookRotation(worldReferenceForward, worldReferenceUp);
-
-        return new Pose(worldFromTrackedImage.position, worldReferenceRotation);
+        var worldFromBoardMatrix = ReferenceFrameTransforms.WorldFromBoard(worldFromBoard);
+        var origin = worldFromBoardMatrix.MultiplyPoint3x4(Vector3.zero);
+        const float axisLength = 0.10f;
+        Debug.DrawRay(origin, worldFromBoardMatrix.MultiplyVector(Vector3.right).normalized * axisLength, Color.red, durationSeconds);
+        Debug.DrawRay(origin, worldFromBoardMatrix.MultiplyVector(Vector3.up).normalized * axisLength, Color.green, durationSeconds);
+        Debug.DrawRay(origin, worldFromBoardMatrix.MultiplyVector(Vector3.forward).normalized * axisLength, Color.blue, durationSeconds);
     }
 
     private IEnumerator RunStartupDiagnostics()
@@ -503,12 +507,12 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         for (var index = 0; index < libraryCount; index++)
         {
             var referenceImage = library[index];
-            var matchesTarget = referenceImage.name == referenceImageName;
+            var matchesTarget = referenceImage.name == TargetReferenceImageName;
             containsTarget |= matchesTarget;
             Debug.Log($"[Reference Image] RUNTIME_LIBRARY_IMAGE index={index} name={referenceImage.name} size={referenceImage.size} specifiedSize={referenceImage.specifySize} matchesBuildingReference={matchesTarget}");
         }
 
-        Debug.Log($"[Reference Image] STARTUP buildingReferenceExists={containsTarget} targetReferenceImageName={referenceImageName} expectedPhysicalWidthMeters={configuredImageWidthMeters:F3} applicationId={Application.identifier} version={Application.version} unityVersion={Application.unityVersion}");
+        Debug.Log($"[Reference Image] STARTUP buildingReferenceExists={containsTarget} targetReferenceImageName={TargetReferenceImageName} expectedPhysicalWidthMeters={ConfiguredImageWidthMeters:F3} applicationId={Application.identifier} version={Application.version} unityVersion={Application.unityVersion}");
         Debug.Log("[Reference Image] BUILD_NOTE The Android player must be rebuilt with Build And Run after changing BuildingReference.png or BuildingReferenceImageLibrary.asset.");
 
         yield return new WaitForSecondsRealtime(10f);
@@ -554,7 +558,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         }
 
         var referenceName = trackedImage.referenceImage.name;
-        Debug.Log($"[Reference Image] {eventName} name={referenceName} trackingState={trackedImage.trackingState} position={trackedImage.transform.position} rotation={trackedImage.transform.rotation.eulerAngles} estimatedSize={trackedImage.size} matchesBuildingReference={referenceName == referenceImageName}");
+        Debug.Log($"[Reference Image] {eventName} name={referenceName} trackingState={trackedImage.trackingState} position={trackedImage.transform.position} rotation={trackedImage.transform.rotation.eulerAngles} estimatedSize={trackedImage.size} matchesBuildingReference={referenceName == TargetReferenceImageName}");
     }
 }
 

@@ -1,7 +1,7 @@
 using UnityEngine;
 
 /// <summary>
-/// Stores T_world_reference: the physical BuildingReference board pose in the ARCore world.
+/// Stores T_world_board: the physical reference board pose in the ARCore world.
 /// Reference-board axes are +X right across the print, +Y toward the printed-board top, and
 /// +Z outward from the printed surface. The ARTrackedImage-to-reference conversion happens once
 /// at acquisition time; later systems must consume this frame without model-local Euler offsets.
@@ -11,8 +11,8 @@ public sealed class PersistentReferenceFrame : MonoBehaviour
 {
     private static PersistentReferenceFrame _instance;
 
-    private bool _hasReferencePose;
-    private Pose _worldFromReference = Pose.identity;
+    private bool _hasBoardPose;
+    private Pose _worldFromBoard = Pose.identity;
 
     public static PersistentReferenceFrame Instance
     {
@@ -32,13 +32,10 @@ public sealed class PersistentReferenceFrame : MonoBehaviour
         }
     }
 
-    public bool HasReferencePose => _hasReferencePose;
-    public Pose ReferenceWorldPose => _worldFromReference;
-    public Matrix4x4 WorldFromReference => Matrix4x4.TRS(
-        _worldFromReference.position,
-        _worldFromReference.rotation,
-        Vector3.one);
-    public Matrix4x4 ReferenceFromWorld => WorldFromReference.inverse;
+    public bool HasBoardPose => _hasBoardPose;
+    public Pose BoardWorldPose => _worldFromBoard;
+    public Matrix4x4 WorldFromBoard => ReferenceFrameTransforms.WorldFromBoard(_worldFromBoard);
+    public Matrix4x4 BoardFromWorld => ReferenceFrameTransforms.BoardFromWorld(_worldFromBoard);
 
     public static bool TryGetExisting(out PersistentReferenceFrame persistentReferenceFrame)
     {
@@ -63,20 +60,20 @@ public sealed class PersistentReferenceFrame : MonoBehaviour
     }
 
     /// <summary>
-    /// Explicitly saves a new T_world_reference. Call this only after a reliable acquisition.
+    /// Explicitly saves a new T_world_board. Call this only after a reliable acquisition.
     /// </summary>
-    public void SetReferencePose(Pose worldFromReference)
+    public void SetWorldFromBoard(Pose worldFromBoard)
     {
-        _worldFromReference = new Pose(
-            worldFromReference.position,
-            Quaternion.Normalize(worldFromReference.rotation));
-        _hasReferencePose = true;
+        _worldFromBoard = new Pose(
+            worldFromBoard.position,
+            Quaternion.Normalize(worldFromBoard.rotation));
+        _hasBoardPose = true;
     }
 
     public void ResetReferencePose()
     {
-        _hasReferencePose = false;
-        _worldFromReference = Pose.identity;
+        _hasBoardPose = false;
+        _worldFromBoard = Pose.identity;
         Debug.Log("[Persistent Reference] REFERENCE_FRAME_RESET");
     }
 }

@@ -11,7 +11,7 @@ public static class ReferenceImageTrackingSetup
     private const string SampleScenePath = "Assets/Scenes/SampleScene.unity";
     private const string LibraryPath = "Assets/AR/ReferenceImages/BuildingReferenceImageLibrary.asset";
     private const string TargetTexturePath = "Assets/AR/ReferenceImages/BuildingReference.png";
-    public const float TargetWidthMeters = 0.16f;
+    public const float TargetWidthMeters = ReferenceBoardDefinition.PhysicalWidthMeters;
 
     [MenuItem("Tools/DJI/Configure Reference Image Tracking")]
     public static void Configure()
@@ -54,7 +54,7 @@ public static class ReferenceImageTrackingSetup
         var statusText = FindComponentByName<Text>("StatusText");
         var actionUi = ReferenceActionUi.FindOrCreate();
         var controller = GetOrAddComponent<ReferenceImageAnchorController>(origin.gameObject);
-        controller.Configure(trackedImageManager, anchorManager, canvas, statusText, actionUi, TargetWidthMeters);
+        controller.Configure(trackedImageManager, anchorManager, canvas, statusText, actionUi);
         controller.enabled = true;
 
         EditorUtility.SetDirty(origin.gameObject);
