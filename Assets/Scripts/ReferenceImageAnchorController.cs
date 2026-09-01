@@ -54,6 +54,8 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     private bool _targetReachedTracking;
     private bool _anchorCreationFailed;
     private bool _sceneTransitionInProgress;
+    private bool _fallbackTouchWasPressed;
+    private bool _inputStatusLogged;
     private float _nextDebugLogTime;
     private int _scanGeneration;
 
@@ -99,6 +101,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     private void Update()
     {
+        LogInputStatusOnce();
         DetectConnectDroneFallbackTap();
 
         if (!debugLogging || _anchor == null || Time.unscaledTime < _nextDebugLogTime)
@@ -440,9 +443,17 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     private void DetectConnectDroneFallbackTap()
     {
+        if (!TryGetPointerState(out var isPressed, out var screenPosition))
+            return;
+
+        var beganThisFrame = isPressed && !_fallbackTouchWasPressed;
+        _fallbackTouchWasPressed = isPressed;
+        if (!beganThisFrame)
+            return;
+
+        Debug.Log($"[Persistent Reference] TOUCH_INPUT_OBSERVED position={screenPosition}");
         if (_sceneTransitionInProgress || connectDroneButton == null ||
-            !connectDroneButton.gameObject.activeInHierarchy || !connectDroneButton.interactable ||
-            !TryGetPointerDownPosition(out var screenPosition))
+            !connectDroneButton.gameObject.activeInHierarchy || !connectDroneButton.interactable)
         {
             return;
         }
@@ -458,18 +469,33 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         LoadDroneView();
     }
 
-    private static bool TryGetPointerDownPosition(out Vector2 screenPosition)
+    private static bool TryGetPointerState(out bool isPressed, out Vector2 screenPosition)
     {
 #if ENABLE_INPUT_SYSTEM
-        if (Touchscreen.current != null && Touchscreen.current.primaryTouch.press.wasPressedThisFrame)
+        if (Touchscreen.current != null)
         {
+            isPressed = Touchscreen.current.primaryTouch.press.isPressed;
             screenPosition = Touchscreen.current.primaryTouch.position.ReadValue();
             return true;
         }
 #endif
 
+        isPressed = false;
         screenPosition = default;
         return false;
+    }
+
+    private void LogInputStatusOnce()
+    {
+        if (_inputStatusLogged)
+            return;
+
+        _inputStatusLogged = true;
+#if ENABLE_INPUT_SYSTEM
+        Debug.Log($"[Reference Image] UI_INPUT_STATUS inputSystemEnabled=true touchscreenAvailable={Touchscreen.current != null} eventSystemAvailable={EventSystem.current != null}");
+#else
+        Debug.Log($"[Reference Image] UI_INPUT_STATUS inputSystemEnabled=false eventSystemAvailable={EventSystem.current != null}");
+#endif
     }
 
     private static void SetButtonLabel(Button button, string text)
