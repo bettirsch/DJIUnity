@@ -19,8 +19,9 @@ printed squares with a ruler before capture.
 
 ## Capture
 
-1. Open DroneView and wait for `DJI_CALIBRATION_FRAME` in Android logcat. It
-   reports the exact delivered detector geometry and states that the input is
+1. Open DroneView and wait for both `DJI_CALIBRATION_FRAME` and
+   `DJI_RUNTIME_FRAME` in Android logcat. The latter reports the exact
+   delivered detector geometry, aspect ratio, and confirms that the input is
    unmodified `YUV_420_888_LUMA8`.
 2. Trigger a bounded capture from a temporary Unity diagnostic control or C#:
 
@@ -60,3 +61,23 @@ data set by excluding more than 25% of observations.
 
 `DjiCameraCalibration.json` becomes valid only when its frame width, height,
 and `YUV_420_888_LUMA8` format exactly match the runtime detector frame.
+
+## Optional DJI DNG Audit
+
+If an original Mini 3 Pro DNG is available, inspect it without changing the
+runtime calibration:
+
+```powershell
+python Tools/InspectDjiDngCalibration.py C:\photos\DJI_0001.DNG `
+  --output Docs\DjiCameraCalibration\dng-metadata-report.json
+```
+
+The script uses ExifTool and reports camera model, focal length, active area,
+default crop, DNG opcode lists, dewarp metadata and calibrated optical-center
+tags where present. DNG correction metadata must not be copied into the
+OpenCV coefficients unless its model is explicitly mapped to the exact
+unmodified ImageReader pixel coordinates.
+
+`PublicFc3582Provisional.md` documents the separate public-data prototype
+profile. It remains diagnostic-only by default; a measured checkerboard solve
+always takes precedence.

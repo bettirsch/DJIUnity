@@ -124,6 +124,10 @@ def main() -> int:
     per_image = [{"file": record["file"], "reprojectionRms": error} for record, error in zip(kept_records, errors)]
     calibration = {
         "calibrationVersion": "DJI_CPU_CHECKERBOARD_V1",
+        "status": "measured_checkerboard",
+        "sourceModel": "DJI CPU ImageReader detector frame",
+        "sourceNotes": "Measured from the unmodified ImageReader luma frames captured by DjiBoardVisionBridge.",
+        "sourceUrls": "",
         "imageWidth": expected_size[0],
         "imageHeight": expected_size[1],
         "detectorFrameFormat": FRAME_FORMAT,
@@ -134,9 +138,12 @@ def main() -> int:
         "cy": float(matrix[1, 2]),
         "distortionCoefficients": [float(value) for value in distortion[:5]],
         "k1": float(distortion[0]), "k2": float(distortion[1]), "p1": float(distortion[2]), "p2": float(distortion[3]), "k3": float(distortion[4]),
+        "distortionModel": "OpenCV Brown-Conrady",
+        "distortionNotes": "Coefficients solved by cv2.calibrateCamera for the exact captured detector-frame geometry.",
         "calibrationRms": rms,
         "calibrationDate": datetime.now(timezone.utc).isoformat(),
         "valid": True,
+        "isMeasuredCalibration": True,
         "rotationDegrees": 0,
         "mirrorX": False,
         "provisional": False,

@@ -30,6 +30,7 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
     [Header("Diagnostics")]
     [SerializeField] private bool diagnosticLogging = true;
     [SerializeField, Min(0.1f)] private float diagnosticLogIntervalSeconds = 1f;
+    [SerializeField] private bool allowProvisionalCalibrationForTesting;
 
     public LocalizationState State { get; private set; } = LocalizationState.WaitingForReference;
     public bool HasVisualWorldPose { get; private set; }
@@ -47,6 +48,15 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
     private float _nextDiagnosticLogTime;
     private readonly List<float> _stationaryPositionDeltas = new();
     private readonly List<float> _stationaryRotationDeltas = new();
+    private readonly List<float> _provisionalReprojectionRms = new();
+    private readonly List<float> _provisionalMaxResiduals = new();
+    private readonly List<float> _provisionalPositionDeltas = new();
+    private readonly List<float> _provisionalRotationDeltas = new();
+    private Pose _lastProvisionalCameraFromBoard;
+    private bool _hasLastProvisionalCameraFromBoard;
+    private int _provisionalCenterSamples;
+    private int _provisionalEdgeSamples;
+    private int _provisionalSampleCount;
     private Texture2D _debugLineTexture;
 
     [Serializable]
@@ -80,6 +90,7 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
     private void Awake()
     {
         _calibration = GetComponent<DjiCameraCalibration>() ?? gameObject.AddComponent<DjiCameraCalibration>();
+        _calibration.SetAllowProvisionalCalibrationForTesting(allowProvisionalCalibrationForTesting);
         _telemetryProvider = FindFirstObjectByType<DjiCameraPoseProvider>();
     }
 
@@ -148,6 +159,12 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
             $"DJI_REFERENCE_BOARD_LAYOUT widthMeters={ReferenceBoardDefinition.Default.WidthMeters:F3} heightMeters={ReferenceBoardDefinition.Default.HeightMeters:F3} " +
             $"phoneImageMeters={ReferenceBoardDefinition.Default.PhoneImageWidthMeters:F3}x{ReferenceBoardDefinition.Default.PhoneImageHeightMeters:F3} " +
             $"markerCount={ReferenceBoardDefinition.Default.DjiFiducialMarkers.Count}");
+        if (data.provisional)
+        {
+            Debug.Log(
+                $"DJI_PROVISIONAL_CALIBRATION_ACTIVE status={data.status} source={data.source} frame={data.imageWidth}x{data.imageHeight} " +
+                $"worldInitializationAllowed={_calibration.CanInitializeWorld} allowProvisionalCalibrationForTesting={_calibration.AllowProvisionalCalibrationForTesting}");
+        }
     }
 
     private IEnumerator StartWhenDjiVideoIsReady()
@@ -180,7 +197,7 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
             return;
         }
 
-        if (!_calibration.IsRuntimeFrameCompatible(result.frameWidth, result.frameHeight, result.detectorFrameFormat) || !result.calibrationUsable)
+        if (!_calibration.IsRuntimeFrameGeometryCompatible(result.frameWidth, result.frameHeight, result.detectorFrameFormat) || !result.calibrationUsable)
         {
             Reject($"CALIBRATION_UNUSABLE_OR_FRAME_MISMATCH runtime={result.frameWidth}x{result.frameHeight}/{result.detectorFrameFormat} calibrated={_calibration.Current.imageWidth}x{_calibration.Current.imageHeight}/{_calibration.Current.detectorFrameFormat}");
             return;
@@ -191,6 +208,11 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
             Reject("NATIVE_BOARD_POSE_UNAVAILABLE");
             return;
         }
+
+        Debug.Log($"DJI_BOARD_POSE_ESTIMATED T_CAMERA_BOARD position={cameraFromBoard.position} rotation={cameraFromBoard.rotation.eulerAngles}");
+        Debug.Log($"DJI_BOARD_REPROJECTION_RMS rmsPixels={result.reprojectionRms:F3} maxResidualPixels={result.maxResidual:F3} corners={result.cornerCount}");
+        Debug.Log($"DJI_BOARD_MAX_CORNER_ERROR pixels={result.maxResidual:F3}");
+        RecordProvisionalDiagnostics(result, cameraFromBoard);
 
         if (!PersistentReferenceFrame.TryGetExisting(out var referenceFrame) || !referenceFrame.HasBoardPose)
         {
@@ -205,9 +227,6 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
             referenceFrame.WorldFromBoard,
             ReferenceFrameTransforms.MatrixFromPose(ReferenceFrameTransforms.Invert(cameraFromBoard)));
         var candidateWorldPose = ReferenceFrameTransforms.PoseFromMatrix(worldFromCamera);
-        Debug.Log($"DJI_BOARD_POSE_ESTIMATED T_CAMERA_BOARD position={cameraFromBoard.position} rotation={cameraFromBoard.rotation.eulerAngles}");
-        Debug.Log($"DJI_BOARD_REPROJECTION_RMS rmsPixels={result.reprojectionRms:F3} maxResidualPixels={result.maxResidual:F3} corners={result.cornerCount}");
-        Debug.Log($"DJI_BOARD_MAX_CORNER_ERROR pixels={result.maxResidual:F3}");
 
         if (!PassesImageQuality(result))
         {
@@ -228,6 +247,14 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
 
         _lastCandidateWorldPose = candidateWorldPose;
         _hasLastCandidate = true;
+
+        if (!_calibration.CanInitializeWorld)
+        {
+            State = LocalizationState.Localizing;
+            LogThrottled("DJI_WORLD_INITIALIZATION_BLOCKED reason=PROVISIONAL_CALIBRATION_DIAGNOSTIC_ONLY");
+            return;
+        }
+
         _consistentSampleCount++;
         State = LocalizationState.Localizing;
         Debug.Log($"DJI_LOCALIZATION_SAMPLE_ACCEPTED count={_consistentSampleCount}/{consistentSamplesRequired} markerCount={result.markerCount}");
@@ -310,6 +337,72 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         Debug.Log($"DJI_VISUAL_STATIONARY_JITTER samples={_stationaryPositionDeltas.Count} positionRmsMeters={Rms(_stationaryPositionDeltas):F4} rotationRmsDegrees={Rms(_stationaryRotationDeltas):F3}");
     }
 
+    private void RecordProvisionalDiagnostics(NativeBoardResult result, Pose cameraFromBoard)
+    {
+        if (!_calibration.Current.provisional)
+            return;
+
+        _provisionalSampleCount++;
+        _provisionalReprojectionRms.Add(result.reprojectionRms);
+        _provisionalMaxResiduals.Add(result.maxResidual);
+        if (_hasLastProvisionalCameraFromBoard)
+        {
+            _provisionalPositionDeltas.Add(Vector3.Distance(cameraFromBoard.position, _lastProvisionalCameraFromBoard.position));
+            _provisionalRotationDeltas.Add(Quaternion.Angle(cameraFromBoard.rotation, _lastProvisionalCameraFromBoard.rotation));
+        }
+
+        _lastProvisionalCameraFromBoard = cameraFromBoard;
+        _hasLastProvisionalCameraFromBoard = true;
+        var normalizedCenterOffset = GetMarkerCenterOffset(result);
+        if (normalizedCenterOffset <= 0.25f)
+            _provisionalCenterSamples++;
+        else
+            _provisionalEdgeSamples++;
+
+        if (_provisionalSampleCount % 10 != 0)
+            return;
+
+        // The operator obtains stationary jitter by holding the camera still;
+        // these raw consecutive-frame deltas intentionally include motion.
+        Debug.Log(
+            $"DJI_PROVISIONAL_CALIBRATION_STATS samples={_provisionalSampleCount} " +
+            $"meanRmsPixels={Mean(_provisionalReprojectionRms):F3} medianRmsPixels={Median(_provisionalReprojectionRms):F3} " +
+            $"maxRmsPixels={Max(_provisionalReprojectionRms):F3} maxCornerResidualPixels={Max(_provisionalMaxResiduals):F3} " +
+            $"centerSamples={_provisionalCenterSamples} edgeSamples={_provisionalEdgeSamples}");
+        Debug.Log(
+            $"DJI_BOARD_POSE_JITTER_POSITION samples={_provisionalPositionDeltas.Count} meters={RmsOrZero(_provisionalPositionDeltas):F5} " +
+            $"condition=HOLD_CAMERA_STILL_FOR_STATIONARY_MEASUREMENT");
+        Debug.Log(
+            $"DJI_BOARD_POSE_JITTER_ROTATION samples={_provisionalRotationDeltas.Count} degrees={RmsOrZero(_provisionalRotationDeltas):F4} " +
+            $"condition=HOLD_CAMERA_STILL_FOR_STATIONARY_MEASUREMENT");
+    }
+
+    private static float GetMarkerCenterOffset(NativeBoardResult result)
+    {
+        if (result.markers == null || result.markers.Length == 0)
+            return 1f;
+
+        var sum = Vector2.zero;
+        var count = 0;
+        foreach (var marker in result.markers)
+        {
+            if (marker.detectedCorners == null)
+                continue;
+            foreach (var corner in marker.detectedCorners)
+            {
+                if (corner?.Length < 2)
+                    continue;
+                sum += new Vector2(corner[0], corner[1]);
+                count++;
+            }
+        }
+
+        if (count == 0 || result.frameWidth <= 0 || result.frameHeight <= 0)
+            return 1f;
+        var normalized = new Vector2(sum.x / count / result.frameWidth - 0.5f, sum.y / count / result.frameHeight - 0.5f);
+        return normalized.magnitude;
+    }
+
     private void LogThrottled(string message)
     {
         if (!diagnosticLogging || Time.unscaledTime < _nextDiagnosticLogTime)
@@ -345,6 +438,36 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         foreach (var value in values)
             sum += value * value;
         return Mathf.Sqrt(sum / values.Count);
+    }
+
+    private static float RmsOrZero(IReadOnlyList<float> values) => values.Count == 0 ? 0f : Rms(values);
+
+    private static float Mean(IReadOnlyList<float> values)
+    {
+        if (values.Count == 0)
+            return 0f;
+        var sum = 0f;
+        foreach (var value in values)
+            sum += value;
+        return sum / values.Count;
+    }
+
+    private static float Median(IReadOnlyList<float> values)
+    {
+        if (values.Count == 0)
+            return 0f;
+        var copy = new List<float>(values);
+        copy.Sort();
+        var middle = copy.Count / 2;
+        return copy.Count % 2 == 0 ? (copy[middle - 1] + copy[middle]) * 0.5f : copy[middle];
+    }
+
+    private static float Max(IReadOnlyList<float> values)
+    {
+        var maximum = 0f;
+        foreach (var value in values)
+            maximum = Mathf.Max(maximum, value);
+        return maximum;
     }
 
     private void DrawBoardAxes(Pose cameraFromBoard, NativeBoardResult result)
@@ -420,6 +543,12 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         else
             Debug.Log($"DJI_CALIBRATION_CAPTURE_REQUESTED frames={frameCount} path={path}");
         return path;
+    }
+
+    public void SetAllowProvisionalCalibrationForTesting(bool allowed)
+    {
+        allowProvisionalCalibrationForTesting = allowed;
+        _calibration.SetAllowProvisionalCalibrationForTesting(allowed);
     }
 }
 
