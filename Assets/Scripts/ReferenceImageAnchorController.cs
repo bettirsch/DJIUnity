@@ -187,11 +187,11 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         CreateAnchorAsync(new Pose(trackedImage.transform.position, trackedImage.transform.rotation), _scanGeneration);
     }
 
-    private async Awaitable CreateAnchorAsync(Pose imagePose, int requestGeneration)
+    private async Awaitable CreateAnchorAsync(Pose worldFromTrackedImage, int requestGeneration)
     {
         try
         {
-            var result = await anchorManager.TryAddAnchorAsync(imagePose);
+            var result = await anchorManager.TryAddAnchorAsync(worldFromTrackedImage);
             if (requestGeneration != _scanGeneration)
                 return;
 
@@ -207,7 +207,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             _anchor.gameObject.name = "ReferenceImageAnchor";
             CreateContentHierarchy(_anchor.transform);
             Debug.Log($"[Reference Image] ANCHOR_CREATED position={_anchor.transform.position} rotation={_anchor.transform.rotation.eulerAngles}");
-            AcquirePersistentReferenceFrame(_anchor.transform);
+            AcquirePersistentReferenceFrame(worldFromTrackedImage);
             SetConnectDroneButtonVisible(true);
             SetRescanButtonVisible(true);
             referenceActionUi?.LogConfiguration("REFERENCE_ACQUIRED");
@@ -453,7 +453,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         return material;
     }
 
-    private void AcquirePersistentReferenceFrame(Transform worldFromTrackedImage)
+    private void AcquirePersistentReferenceFrame(Pose worldFromTrackedImage)
     {
         var persistentReferenceFrame = PersistentReferenceFrame.Instance;
         if (persistentReferenceFrame.HasBoardPose)
@@ -463,15 +463,14 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         }
 
         var boardDefinition = ReferenceBoardDefinition.Default;
-        var worldFromBoard = ReferenceFrameTransforms.CalculateWorldFromBoard(
-            new Pose(worldFromTrackedImage.position, worldFromTrackedImage.rotation),
-            boardDefinition);
+        var worldFromBoard = ReferenceFrameTransforms.CalculateWorldFromBoard(worldFromTrackedImage, boardDefinition);
         persistentReferenceFrame.SetWorldFromBoard(worldFromBoard);
         var validRoundTrip = ReferenceFrameTransforms.ValidateWorldBoardRoundTrip(worldFromBoard, out var validation);
         Debug.Log(
             $"[Persistent Reference] REFERENCE_FRAME_ACQUIRED T_WORLD_BOARD " +
             $"position={worldFromBoard.position} rotation={worldFromBoard.rotation.eulerAngles} " +
             $"widthMeters={boardDefinition.WidthMeters:F3} heightMeters={boardDefinition.HeightMeters:F3}");
+        Debug.Log($"[Persistent Reference] T_WORLD_TRACKED_IMAGE position={worldFromTrackedImage.position} rotation={worldFromTrackedImage.rotation.eulerAngles}");
         Debug.Log($"[Persistent Reference] TRANSFORM_ROUND_TRIP {validation}");
         if (!validRoundTrip)
             Debug.LogError("[Persistent Reference] TRANSFORM_ROUND_TRIP_FAILED");
