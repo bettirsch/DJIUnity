@@ -536,10 +536,11 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     {
         var inputModule = eventSystem.currentInputModule;
         var selected = eventSystem.currentSelectedGameObject;
+        var selectedName = selected != null ? selected.name : "none";
         Debug.Log(
             $"[Reference Image] UI_EVENT_SYSTEM_OK object={eventSystem.gameObject.name} " +
             $"inputModule={inputModule?.GetType().Name} activeEventSystems={activeEventSystemCount} " +
-            $"selected={selected?.name ?? \"none\"}");
+            $"selected={selectedName}");
     }
 
     private void LogUiButtonConfiguration(string phase, Button button)
@@ -633,11 +634,12 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         var library = trackedImageManager != null ? trackedImageManager.referenceLibrary : null;
         var libraryCount = library?.count ?? 0;
         var containsTarget = false;
+        var droneViewLoadable = Application.CanStreamedLevelBeLoaded("DroneView");
 
         Debug.Log($"[Reference Image] STARTUP trackedImageManagerEnabled={trackedImageManager != null && trackedImageManager.enabled} managerActive={trackedImageManager != null && trackedImageManager.gameObject.activeInHierarchy} controllerActive={gameObject.activeInHierarchy}");
         Debug.Log($"[Reference Image] STARTUP referenceLibraryAssigned={library != null} referenceLibraryCount={libraryCount} requestedMaxNumberOfMovingImages={trackedImageManager?.requestedMaxNumberOfMovingImages ?? -1} currentMaxNumberOfMovingImages={trackedImageManager?.currentMaxNumberOfMovingImages ?? -1}");
         Debug.Log($"[Reference Image] STARTUP arSessionState={ARSession.state} notTrackingReason={ARSession.notTrackingReason} imageTrackingSubsystemAvailable={trackedImageManager != null && trackedImageManager.subsystem != null} imageTrackingSubsystemRunning={trackedImageManager != null && trackedImageManager.subsystem != null && trackedImageManager.subsystem.running}");
-        Debug.Log($"[Reference Image] STARTUP droneViewLoadable={Application.CanStreamedLevelBeLoaded(\"DroneView\")}");
+        Debug.Log($"[Reference Image] STARTUP droneViewLoadable={droneViewLoadable}");
 
         for (var index = 0; index < libraryCount; index++)
         {
