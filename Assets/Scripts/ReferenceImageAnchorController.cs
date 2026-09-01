@@ -1,10 +1,15 @@
 using System;
 using System.Collections;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.UI;
+#endif
 
 [DisallowMultipleComponent]
 [RequireComponent(typeof(ARTrackedImageManager))]
@@ -48,6 +53,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     private bool _targetImageAdded;
     private bool _targetReachedTracking;
     private bool _anchorCreationFailed;
+    private bool _sceneTransitionInProgress;
     private float _nextDebugLogTime;
     private int _scanGeneration;
 
@@ -93,6 +99,8 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     private void Update()
     {
+        DetectConnectDroneFallbackTap();
+
         if (!debugLogging || _anchor == null || Time.unscaledTime < _nextDebugLogTime)
             return;
 
@@ -333,10 +341,12 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
         SetConnectButtonVisible(false);
         SetResetButtonVisible(false);
+        EnsureUiInput();
+        DisableStatusRaycasts();
         if (connectDroneButton != null)
         {
             connectDroneButton.onClick.RemoveAllListeners();
-            connectDroneButton.onClick.AddListener(LoadDroneView);
+            connectDroneButton.onClick.AddListener(OnConnectDroneButtonClicked);
             SetButtonLabel(connectDroneButton, "Csatlakoztassa a drónt");
         }
 
@@ -354,6 +364,9 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     private void LoadDroneView()
     {
+        if (_sceneTransitionInProgress)
+            return;
+
         if (!PersistentReferenceFrame.Instance.HasReferencePose)
         {
             Debug.LogWarning("[Persistent Reference] SCENE_TRANSITION_BLOCKED reason=REFERENCE_FRAME_NOT_ACQUIRED");
@@ -361,8 +374,15 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             return;
         }
 
+        _sceneTransitionInProgress = true;
         Debug.Log("[Persistent Reference] SCENE_TRANSITION_ALLOWED destination=DroneView");
         SceneManager.LoadScene("DroneView");
+    }
+
+    private void OnConnectDroneButtonClicked()
+    {
+        Debug.Log("[Persistent Reference] CONNECT_DRONE_BUTTON_CLICKED source=UNITY_UI");
+        LoadDroneView();
     }
 
     private void SetState(ScanState state, string status)
@@ -389,6 +409,67 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     {
         if (resetButton != null)
             resetButton.gameObject.SetActive(visible);
+    }
+
+    private void EnsureUiInput()
+    {
+        if (overlayCanvas != null && overlayCanvas.GetComponent<GraphicRaycaster>() == null)
+            overlayCanvas.gameObject.AddComponent<GraphicRaycaster>();
+
+        if (EventSystem.current != null)
+            return;
+
+        var eventSystemObject = new GameObject("Reference Image EventSystem");
+        eventSystemObject.AddComponent<EventSystem>();
+#if ENABLE_INPUT_SYSTEM
+        eventSystemObject.AddComponent<InputSystemUIInputModule>();
+#else
+        eventSystemObject.AddComponent<StandaloneInputModule>();
+#endif
+        Debug.Log("[Reference Image] UI_EVENT_SYSTEM_CREATED");
+    }
+
+    private void DisableStatusRaycasts()
+    {
+        if (statusText == null)
+            return;
+
+        foreach (var graphic in statusText.GetComponentsInParent<Graphic>(true))
+            graphic.raycastTarget = false;
+    }
+
+    private void DetectConnectDroneFallbackTap()
+    {
+        if (_sceneTransitionInProgress || connectDroneButton == null ||
+            !connectDroneButton.gameObject.activeInHierarchy || !connectDroneButton.interactable ||
+            !TryGetPointerDownPosition(out var screenPosition))
+        {
+            return;
+        }
+
+        var buttonRect = connectDroneButton.transform as RectTransform;
+        var eventCamera = overlayCanvas != null && overlayCanvas.renderMode != RenderMode.ScreenSpaceOverlay
+            ? overlayCanvas.worldCamera
+            : null;
+        if (!RectTransformUtility.RectangleContainsScreenPoint(buttonRect, screenPosition, eventCamera))
+            return;
+
+        Debug.Log("[Persistent Reference] CONNECT_DRONE_BUTTON_CLICKED source=TOUCH_FALLBACK");
+        LoadDroneView();
+    }
+
+    private static bool TryGetPointerDownPosition(out Vector2 screenPosition)
+    {
+#if ENABLE_INPUT_SYSTEM
+        if (Touchscreen.current != null && Touchscreen.current.primaryTouch.press.wasPressedThisFrame)
+        {
+            screenPosition = Touchscreen.current.primaryTouch.position.ReadValue();
+            return true;
+        }
+#endif
+
+        screenPosition = default;
+        return false;
     }
 
     private static void SetButtonLabel(Button button, string text)
