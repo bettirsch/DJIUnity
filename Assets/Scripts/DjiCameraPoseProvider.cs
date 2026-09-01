@@ -16,19 +16,22 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
     [SerializeField] [Min(0.02f)] private float pollIntervalSeconds = 0.1f;
 
     [Header("Fixed Physical Camera Extrinsic")]
-    [Tooltip("T_gimbal_camera. Calibrate this once when the physical Mini camera axes and optical-center offset are measured. Identity is an explicit unverified default, not an axis correction.")]
+    [Tooltip("T_gimbal_camera. The default converts the declared OpenCV optical camera axes to neutral DJI gimbal axes. Its zero translation is an unverified optical-center offset and must be measured before production localization.")]
     [SerializeField] private Vector3 gimbalFromCameraPositionMeters = Vector3.zero;
-    [SerializeField] private Quaternion gimbalFromCameraRotation = Quaternion.identity;
+    [SerializeField] private Quaternion gimbalFromCameraRotation = new Quaternion(0.5f, 0.5f, 0.5f, 0.5f);
 
     [Header("Diagnostics")]
-    [SerializeField] private bool diagnosticLogging;
+    [SerializeField] private bool diagnosticLogging = true;
     [SerializeField] [Min(0.1f)] private float diagnosticLogIntervalSeconds = 1f;
 
-    public bool HasTelemetryPose { get; private set; }
+    public bool HasTelemetryPose => HasTelemetryOrientation && HasTelemetryPosition;
+    public bool HasTelemetryOrientation { get; private set; }
+    public bool HasTelemetryPosition { get; private set; }
     /// <summary>
     /// T_navigation_camera. Its Vector3 components use local NED coordinates,
-    /// not Unity world coordinates. The camera local axes are DJI optical-frame
-    /// +X forward, +Y right, +Z down until GimbalFromCamera is calibrated.
+    /// not Unity world coordinates. Its position is valid only when
+    /// HasTelemetryPosition is true. Camera axes use the OpenCV optical-frame
+    /// convention: +X image right, +Y image down, +Z optical forward.
     /// </summary>
     public Pose CurrentNavigationCameraPose => DjiNavigationFrameTransforms.PoseFromMatrix(_navigationFromCamera);
     public Matrix4x4 NavigationFromAircraft { get; private set; } = Matrix4x4.identity;
@@ -36,9 +39,10 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
     public Matrix4x4 GimbalFromCamera => DjiNavigationFrameTransforms.GimbalFromCamera(CurrentGimbalFromCameraCalibration);
     public Matrix4x4 NavigationFromCamera => _navigationFromCamera;
     public DJIPoseSnapshot LatestSnapshot { get; private set; }
-    public Vector3 CameraForwardInNavigation => CurrentNavigationCameraPose.rotation * Vector3.right;
-    public Vector3 CameraRightInNavigation => CurrentNavigationCameraPose.rotation * Vector3.up;
-    public Vector3 CameraDownInNavigation => CurrentNavigationCameraPose.rotation * Vector3.forward;
+    public Vector3 CameraForwardInNavigation => CurrentNavigationCameraPose.rotation * Vector3.forward;
+    public Vector3 CameraRightInNavigation => CurrentNavigationCameraPose.rotation * Vector3.right;
+    public Vector3 CameraDownInNavigation => CurrentNavigationCameraPose.rotation * Vector3.up;
+    public Vector3 CameraUpInNavigation => -CameraDownInNavigation;
 
     private Matrix4x4 _navigationFromCamera = Matrix4x4.identity;
     private bool _hasNavigationOrigin;
@@ -59,6 +63,12 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
     {
         gimbalFromCameraPositionMeters = gimbalFromCamera.position;
         gimbalFromCameraRotation = Quaternion.Normalize(gimbalFromCamera.rotation);
+    }
+
+    public void ConfigureDiagnosticLogging(bool enabled, float intervalSeconds = 1f)
+    {
+        diagnosticLogging = enabled;
+        diagnosticLogIntervalSeconds = Mathf.Max(0.1f, intervalSeconds);
     }
 
     private void Awake()
@@ -82,7 +92,8 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
         var json = DJIPoseProvider.GetLatestPoseJson();
         if (string.IsNullOrWhiteSpace(json))
         {
-            HasTelemetryPose = false;
+            HasTelemetryOrientation = false;
+            HasTelemetryPosition = false;
             return;
         }
 
@@ -93,25 +104,26 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
         }
         catch (Exception exception)
         {
-            HasTelemetryPose = false;
+            HasTelemetryOrientation = false;
+            HasTelemetryPosition = false;
             Debug.LogWarning($"DJI_CAMERA_TELEMETRY_PARSE_FAILED reason={exception.Message}");
             return;
         }
 
         if (snapshot == null)
         {
-            HasTelemetryPose = false;
+            HasTelemetryOrientation = false;
+            HasTelemetryPosition = false;
             return;
         }
 
         LatestSnapshot = snapshot;
-        var hasPosition = snapshot.aircraft.hasLocation && snapshot.aircraft.hasAltitude;
-        var hasAttitude = snapshot.aircraft.hasAttitude && snapshot.gimbal.hasAttitude;
-        HasTelemetryPose = hasPosition && hasAttitude;
-        if (!HasTelemetryPose)
+        HasTelemetryPosition = snapshot.aircraft.hasLocation && snapshot.aircraft.hasAltitude;
+        HasTelemetryOrientation = snapshot.aircraft.hasAttitude && snapshot.gimbal.hasAttitude;
+        if (!HasTelemetryOrientation)
             return;
 
-        if (!_hasNavigationOrigin)
+        if (HasTelemetryPosition && !_hasNavigationOrigin)
         {
             _navigationOrigin = new GeodeticNavigationOrigin(
                 snapshot.aircraft.latitude,
@@ -126,7 +138,9 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
             (float)snapshot.aircraft.roll,
             (float)snapshot.aircraft.yaw);
         var navigationFromAircraft = new Pose(
-            CalculateNavigationFromAircraftPosition(snapshot.aircraft),
+            HasTelemetryPosition
+                ? CalculateNavigationFromAircraftPosition(snapshot.aircraft)
+                : Vector3.zero,
             navigationFromAircraftRotation);
         NavigationFromAircraft = DjiNavigationFrameTransforms.NavigationFromAircraft(navigationFromAircraft);
 
@@ -187,17 +201,22 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
 
         _nextDiagnosticLogTime = Time.unscaledTime + diagnosticLogIntervalSeconds;
         var cameraPose = CurrentNavigationCameraPose;
+        var navigationFromGimbalRotation = Quaternion.Normalize(navigationFromAircraftRotation * aircraftFromGimbalRotation);
         Debug.Log(
-            $"DJI_AIRCRAFT_ATTITUDE pitchDeg={snapshot.aircraft.pitch:F2} rollDeg={snapshot.aircraft.roll:F2} yawDeg={snapshot.aircraft.yaw:F2} " +
-            $"navigationRotation={FormatQuaternion(navigationFromAircraftRotation)} positionNedMeters={FormatVector(NavigationFromAircraft.GetColumn(3))}");
+            $"DJI_POSE_RAW aircraftPitchDeg={snapshot.aircraft.pitch:F2} aircraftRollDeg={snapshot.aircraft.roll:F2} aircraftYawDeg={snapshot.aircraft.yaw:F2} " +
+            $"gimbalPitchDeg={snapshot.gimbal.pitch:F2} gimbalRollDeg={snapshot.gimbal.roll:F2} gimbalYawDeg={snapshot.gimbal.yaw:F2} " +
+            $"gimbalYawRelativeToAircraftDeg={snapshot.gimbal.yawRelativeToAircraftHeading:F2} relativeYawAvailable={snapshot.gimbal.hasYawRelativeToAircraftHeading} " +
+            $"hasOrientation={HasTelemetryOrientation} hasPosition={HasTelemetryPosition}");
         Debug.Log(
-            $"DJI_GIMBAL_ATTITUDE pitchDeg={snapshot.gimbal.pitch:F2} rollDeg={snapshot.gimbal.roll:F2} yawDeg={snapshot.gimbal.yaw:F2} " +
-            $"yawRelativeToAircraftDeg={snapshot.gimbal.yawRelativeToAircraftHeading:F2} relativeYawAvailable={snapshot.gimbal.hasYawRelativeToAircraftHeading} " +
-            $"aircraftFromGimbalRotation={FormatQuaternion(aircraftFromGimbalRotation)}");
+            $"DJI_AIRCRAFT_ROTATION navigationFromAircraft={FormatQuaternion(navigationFromAircraftRotation)} " +
+            $"positionNedMeters={(HasTelemetryPosition ? FormatVector(NavigationFromAircraft.GetColumn(3)) : "UNAVAILABLE")}");
         Debug.Log(
-            $"DJI_CAMERA_TELEMETRY_ROTATION navigationRotation={FormatQuaternion(cameraPose.rotation)} " +
-            $"cameraForwardNed={FormatVector(CameraForwardInNavigation)} cameraRightNed={FormatVector(CameraRightInNavigation)} cameraDownNed={FormatVector(CameraDownInNavigation)} " +
-            $"gimbalFromCameraCalibration={FormatQuaternion(CurrentGimbalFromCameraCalibration.rotation)} worldBoardAlignment=NOT_AVAILABLE");
+            $"DJI_GIMBAL_ROTATION aircraftFromGimbal={FormatQuaternion(aircraftFromGimbalRotation)} " +
+            $"navigationFromGimbal={FormatQuaternion(navigationFromGimbalRotation)} yawSource={(snapshot.gimbal.hasYawRelativeToAircraftHeading ? "RELATIVE_TO_AIRCRAFT" : "NED_ABSOLUTE_FALLBACK")}");
+        Debug.Log(
+            $"DJI_CAMERA_FORWARD navigationFromCamera={FormatQuaternion(cameraPose.rotation)} " +
+            $"forwardNed={FormatVector(CameraForwardInNavigation)} upNed={FormatVector(CameraUpInNavigation)} rightNed={FormatVector(CameraRightInNavigation)} " +
+            $"gimbalFromCamera={FormatQuaternion(CurrentGimbalFromCameraCalibration.rotation)} worldBoardAlignment=NOT_AVAILABLE");
     }
 
     private void LogSeparateReferenceFrameOnce()
@@ -215,11 +234,12 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
         if (!diagnosticLogging)
             return;
 
-        var yawEastForward = DjiNavigationFrameTransforms.RotationFromDjiNedAttitudeDegrees(0f, 0f, 90f) * Vector3.right;
-        var gimbalDownForward = DjiNavigationFrameTransforms.RotationFromDjiNedAttitudeDegrees(-90f, 0f, 0f) * Vector3.right;
+        var gimbalFromCamera = DjiNavigationFrameTransforms.DefaultGimbalFromOpenCvCameraRotation;
+        var yawEastForward = DjiNavigationFrameTransforms.RotationFromDjiNedAttitudeDegrees(0f, 0f, 90f) * gimbalFromCamera * Vector3.forward;
+        var gimbalDownForward = DjiNavigationFrameTransforms.RotationFromDjiNedAttitudeDegrees(-90f, 0f, 0f) * gimbalFromCamera * Vector3.forward;
         Debug.Log(
             $"DJI_TELEMETRY_CONVENTION_CHECK yawPlus90ForwardNed={FormatVector(yawEastForward)} expected=(0,1,0) " +
-            $"gimbalPitchMinus90ForwardNed={FormatVector(gimbalDownForward)} expected=(0,0,1)");
+            $"gimbalPitchMinus90CameraForwardNed={FormatVector(gimbalDownForward)} expected=(0,0,1)");
     }
 
     private static string FormatQuaternion(Quaternion rotation) =>

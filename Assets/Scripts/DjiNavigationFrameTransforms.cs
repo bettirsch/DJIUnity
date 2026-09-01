@@ -8,6 +8,17 @@ using UnityEngine;
 /// </summary>
 public static class DjiNavigationFrameTransforms
 {
+    /// <summary>
+    /// T_gimbal_camera for the declared camera optical frame: +X image right,
+    /// +Y image down, +Z optical forward. At neutral attitude the DJI gimbal
+    /// frame uses +X forward, +Y right, +Z down, so the camera basis columns
+    /// in gimbal coordinates are (right, down, forward) = (+Y, +Z, +X).
+    /// This is a coordinate-definition transform, not an empirically measured
+    /// Mini 3 Pro optical-center offset.
+    /// </summary>
+    public static Quaternion DefaultGimbalFromOpenCvCameraRotation =>
+        new Quaternion(0.5f, 0.5f, 0.5f, 0.5f);
+
     public static Matrix4x4 MatrixFromPose(Pose parentFromChild) =>
         Matrix4x4.TRS(parentFromChild.position, parentFromChild.rotation, Vector3.one);
 

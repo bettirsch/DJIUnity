@@ -71,7 +71,8 @@ internal static class DJIDroneViewBootstrap
         if (Object.FindFirstObjectByType<DjiCameraPoseProvider>(FindObjectsInactive.Include) == null)
         {
             var poseProviderObject = new GameObject(CameraPoseProviderName);
-            poseProviderObject.AddComponent<DjiCameraPoseProvider>();
+            var poseProvider = poseProviderObject.AddComponent<DjiCameraPoseProvider>();
+            poseProvider.ConfigureDiagnosticLogging(true, 1f);
             Debug.Log("DJI_BOOTSTRAP_STATE=CAMERA_TELEMETRY_PROVIDER_CREATED");
         }
     }

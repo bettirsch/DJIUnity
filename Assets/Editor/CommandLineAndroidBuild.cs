@@ -8,6 +8,16 @@ public static class CommandLineAndroidBuild
 {
     public static void BuildApk()
     {
+        BuildAndroidPlayer(BuildOptions.None);
+    }
+
+    public static void BuildAndRun()
+    {
+        BuildAndroidPlayer(BuildOptions.AutoRunPlayer);
+    }
+
+    private static void BuildAndroidPlayer(BuildOptions options)
+    {
         var outputPath = GetArgument("-outputPath") ?? "build/DJIUnity.apk";
         var outputDirectory = Path.GetDirectoryName(outputPath);
         if (!string.IsNullOrEmpty(outputDirectory))
@@ -26,7 +36,7 @@ public static class CommandLineAndroidBuild
             scenes = scenes,
             locationPathName = outputPath,
             target = BuildTarget.Android,
-            options = BuildOptions.None
+            options = options
         };
 
         var report = BuildPipeline.BuildPlayer(buildOptions);
