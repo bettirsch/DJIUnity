@@ -364,9 +364,10 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         }
 
         _sceneTransitionInProgress = true;
+        Debug.Log("REFERENCE_FRAME_HANDOFF_OK");
         Debug.Log("[Persistent Reference] SCENE_TRANSITION_ALLOWED destination=DroneView");
-        Debug.Log("[Persistent Reference] SCENE_LOAD_REQUESTED DroneView");
-        SceneManager.LoadScene("DroneView");
+        Debug.Log("DJI_SCENE_LOAD_REQUESTED DroneView");
+        SceneManager.LoadScene(DJIDroneViewBootstrap.DroneViewSceneName);
     }
 
     public void OnConnectDroneClicked()

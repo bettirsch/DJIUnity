@@ -352,7 +352,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &673657554
 RectTransform:
   m_ObjectHideFlags: 0
@@ -416,19 +416,7 @@ MonoBehaviour:
   m_TargetGraphic: {fileID: 673657556}
   m_OnClick:
     m_PersistentCalls:
-      m_Calls:
-      - m_Target: {fileID: 1644639005}
-        m_TargetAssemblyTypeName: GoTo, Assembly-CSharp
-        m_MethodName: LoadSampleScene
-        m_Mode: 1
-        m_Arguments:
-          m_ObjectArgument: {fileID: 0}
-          m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
-          m_IntArgument: 0
-          m_FloatArgument: 0
-          m_StringArgument:
-          m_BoolArgument: 0
-        m_CallState: 2
+      m_Calls: []
 --- !u!114 &673657556
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -522,12 +510,12 @@ GameObject:
   - component: {fileID: 1644639006}
   - component: {fileID: 1644639005}
   m_Layer: 0
-  m_Name: GoTo
+  m_Name: Deprecated GoTo SampleScene Test
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &1644639005
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -568,12 +556,12 @@ GameObject:
   - component: {fileID: 1722263248}
   - component: {fileID: 1722263247}
   m_Layer: 5
-  m_Name: Canvas
+  m_Name: Deprecated DroneView Test Navigation
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &1722263247
 MonoBehaviour:
   m_ObjectHideFlags: 0
