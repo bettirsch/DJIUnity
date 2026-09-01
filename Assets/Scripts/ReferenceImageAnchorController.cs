@@ -69,6 +69,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         }
 
         PreparePhoneCameraScanning();
+        _ = PersistentReferenceFrame.Instance;
         PrepareUi();
         SetState(ScanState.Searching, "Tartsa a referencia-képet a telefon kameraképében.");
     }
@@ -103,6 +104,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     {
         _scanGeneration++;
         _anchorCreationInProgress = false;
+        PersistentReferenceFrame.Instance.ResetReferencePose();
 
         if (_anchor != null)
         {
@@ -210,6 +212,7 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             _anchor.gameObject.name = "ReferenceImageAnchor";
             CreateContentHierarchy(_anchor.transform);
             Debug.Log($"[Reference Image] ANCHOR_CREATED position={_anchor.transform.position} rotation={_anchor.transform.rotation.eulerAngles}");
+            AcquirePersistentReferenceFrame(_anchor.transform);
             SetConnectButtonVisible(true);
             SetResetButtonVisible(true);
             SetState(ScanState.Anchored, "Referencia-kép rögzítve. Csatlakoztassa a drónt.");
@@ -351,6 +354,14 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     private void LoadDroneView()
     {
+        if (!PersistentReferenceFrame.Instance.HasReferencePose)
+        {
+            Debug.LogWarning("[Persistent Reference] SCENE_TRANSITION_BLOCKED reason=REFERENCE_FRAME_NOT_ACQUIRED");
+            SetStatus("A referencia-kép rögzítése szükséges a drónnézet megnyitásához.");
+            return;
+        }
+
+        Debug.Log("[Persistent Reference] SCENE_TRANSITION_ALLOWED destination=DroneView");
         SceneManager.LoadScene("DroneView");
     }
 
@@ -404,6 +415,34 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             material.SetColor("_Color", color);
 
         return material;
+    }
+
+    private void AcquirePersistentReferenceFrame(Transform worldFromTrackedImage)
+    {
+        var persistentReferenceFrame = PersistentReferenceFrame.Instance;
+        if (persistentReferenceFrame.HasReferencePose)
+        {
+            Debug.Log("[Persistent Reference] REFERENCE_FRAME_ALREADY_ACQUIRED preservingExistingPose=true");
+            return;
+        }
+
+        var worldFromReference = ConvertTrackedImagePoseToReferencePose(worldFromTrackedImage);
+        persistentReferenceFrame.SetReferencePose(worldFromReference);
+        Debug.Log(
+            $"[Persistent Reference] REFERENCE_FRAME_ACQUIRED " +
+            $"position={worldFromReference.position} rotation={worldFromReference.rotation.eulerAngles}");
+    }
+
+    private static Pose ConvertTrackedImagePoseToReferencePose(Transform worldFromTrackedImage)
+    {
+        // ARTrackedImage uses +X right, +Y image-plane normal, and +Z opposite board-up.
+        // Convert it once to the documented reference board axes: +X right, +Y board-up, +Z outward.
+        var worldReferenceRight = worldFromTrackedImage.right;
+        var worldReferenceUp = -worldFromTrackedImage.forward;
+        var worldReferenceForward = worldFromTrackedImage.up;
+        var worldReferenceRotation = Quaternion.LookRotation(worldReferenceForward, worldReferenceUp);
+
+        return new Pose(worldFromTrackedImage.position, worldReferenceRotation);
     }
 
     private IEnumerator RunStartupDiagnostics()
