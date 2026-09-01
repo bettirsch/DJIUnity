@@ -340,7 +340,10 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     private void PrepareUi()
     {
         if (overlayCanvas != null)
+        {
+            NormalizeOverlayCanvasTransform();
             overlayCanvas.gameObject.SetActive(true);
+        }
 
         SetConnectButtonVisible(false);
         SetResetButtonVisible(false);
@@ -363,6 +366,18 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         SetObjectActiveByName("Prototype Warning", false);
         SetObjectActiveByName("Center Reticle", false);
         SetObjectActiveByName("AR Placement Indicator", false);
+    }
+
+    private void NormalizeOverlayCanvasTransform()
+    {
+        var canvasTransform = overlayCanvas.transform as RectTransform;
+        if (canvasTransform == null || canvasTransform.localScale.sqrMagnitude > 0.0001f)
+            return;
+
+        // A zero-scale screen-space Canvas can still render but gives every UI element a zero
+        // hit-test rect on Android. Restore the standard Canvas transform before wiring buttons.
+        canvasTransform.localScale = Vector3.one;
+        Debug.Log("[Reference Image] UI_CANVAS_SCALE_RESTORED value=(1, 1, 1)");
     }
 
     private void LoadDroneView()
