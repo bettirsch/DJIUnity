@@ -419,17 +419,32 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         if (overlayCanvas != null && overlayCanvas.GetComponent<GraphicRaycaster>() == null)
             overlayCanvas.gameObject.AddComponent<GraphicRaycaster>();
 
-        if (EventSystem.current != null)
-            return;
-
-        var eventSystemObject = new GameObject("Reference Image EventSystem");
-        eventSystemObject.AddComponent<EventSystem>();
+        var eventSystem = EventSystem.current;
+        if (eventSystem == null)
+        {
+            var eventSystemObject = new GameObject("Reference Image EventSystem");
+            eventSystem = eventSystemObject.AddComponent<EventSystem>();
 #if ENABLE_INPUT_SYSTEM
-        eventSystemObject.AddComponent<InputSystemUIInputModule>();
+            eventSystemObject.AddComponent<InputSystemUIInputModule>();
 #else
-        eventSystemObject.AddComponent<StandaloneInputModule>();
+            eventSystemObject.AddComponent<StandaloneInputModule>();
 #endif
-        Debug.Log("[Reference Image] UI_EVENT_SYSTEM_CREATED");
+            Debug.Log("[Reference Image] UI_EVENT_SYSTEM_CREATED");
+        }
+
+#if ENABLE_INPUT_SYSTEM
+        var inputModule = eventSystem.GetComponent<InputSystemUIInputModule>();
+        if (inputModule == null)
+            inputModule = eventSystem.gameObject.AddComponent<InputSystemUIInputModule>();
+
+        // The scene's XR action asset did not provide a touch UI pointer on Android.
+        // Use Unity's standard UI actions so both touchscreen and mouse clicks reach the buttons.
+        var wasEnabled = inputModule.enabled;
+        inputModule.enabled = false;
+        inputModule.AssignDefaultActions();
+        inputModule.enabled = wasEnabled;
+        Debug.Log("[Reference Image] UI_INPUT_ACTIONS_ASSIGNED source=DEFAULT_TOUCH_COMPATIBLE");
+#endif
     }
 
     private void DisableStatusRaycasts()
