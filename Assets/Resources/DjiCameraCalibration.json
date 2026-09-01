@@ -1,0 +1,13 @@
+{
+  "imageWidth": 1920,
+  "imageHeight": 1080,
+  "fx": 0.0,
+  "fy": 0.0,
+  "cx": 0.0,
+  "cy": 0.0,
+  "distortionCoefficients": [],
+  "rotationDegrees": 0,
+  "mirrorX": false,
+  "provisional": true,
+  "source": "UNCONFIGURED_EXACT_DJI_CPU_FRAME_CALIBRATION_REQUIRED"
+}

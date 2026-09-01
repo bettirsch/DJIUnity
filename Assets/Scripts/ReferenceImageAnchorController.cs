@@ -52,7 +52,9 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     public ARTrackedImageManager ConfiguredTrackedImageManager => trackedImageManager;
     public ARAnchorManager ConfiguredAnchorManager => anchorManager;
     public string TargetReferenceImageName => ReferenceBoardDefinition.BuildingReferenceImageName;
-    public float ConfiguredImageWidthMeters => ReferenceBoardDefinition.Default.WidthMeters;
+    // AR Foundation still recognizes only the centered 180 mm image, not
+    // the larger physical board that adds DJI fiducials around it.
+    public float ConfiguredImageWidthMeters => ReferenceBoardDefinition.Default.PhoneImageWidthMeters;
 
     private void Awake()
     {

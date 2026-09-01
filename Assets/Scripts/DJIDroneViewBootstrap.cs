@@ -8,6 +8,7 @@ internal static class DJIDroneViewBootstrap
     private const string DroneCameraName = "DJI Drone View Camera";
     private const string RuntimeDiagnosticsName = "DJI Drone View Runtime Diagnostics";
     private const string CameraPoseProviderName = "DJI Camera Telemetry Pose Provider";
+    private const string BoardVisionProviderName = "DJI Reference Board Vision Provider";
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
     private static void RegisterSceneCallbacks()
@@ -74,6 +75,14 @@ internal static class DJIDroneViewBootstrap
             var poseProvider = poseProviderObject.AddComponent<DjiCameraPoseProvider>();
             poseProvider.ConfigureDiagnosticLogging(true, 1f);
             Debug.Log("DJI_BOOTSTRAP_STATE=CAMERA_TELEMETRY_PROVIDER_CREATED");
+        }
+
+        if (Object.FindFirstObjectByType<DjiBoardVisionProvider>(FindObjectsInactive.Include) == null)
+        {
+            var boardVisionObject = new GameObject(BoardVisionProviderName);
+            boardVisionObject.AddComponent<DjiCameraCalibration>();
+            boardVisionObject.AddComponent<DjiBoardVisionProvider>();
+            Debug.Log("DJI_BOOTSTRAP_STATE=REFERENCE_BOARD_VISION_PROVIDER_CREATED");
         }
     }
 
