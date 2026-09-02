@@ -77,13 +77,21 @@ internal static class DJIDroneViewBootstrap
             Debug.Log("DJI_BOOTSTRAP_STATE=CAMERA_TELEMETRY_PROVIDER_CREATED");
         }
 
-        if (Object.FindFirstObjectByType<DjiBoardVisionProvider>(FindObjectsInactive.Include) == null)
+        var validationSettings = Resources.Load<DjiBoardVisionValidationSettings>(DjiBoardVisionValidationSettings.ResourceName);
+        var allowProvisionalValidation = validationSettings != null && validationSettings.allowProvisionalCalibrationForValidation;
+        var boardVisionProvider = Object.FindFirstObjectByType<DjiBoardVisionProvider>(FindObjectsInactive.Include);
+        if (boardVisionProvider == null)
         {
             var boardVisionObject = new GameObject(BoardVisionProviderName);
             boardVisionObject.AddComponent<DjiCameraCalibration>();
-            boardVisionObject.AddComponent<DjiBoardVisionProvider>();
+            boardVisionProvider = boardVisionObject.AddComponent<DjiBoardVisionProvider>();
             Debug.Log("DJI_BOOTSTRAP_STATE=REFERENCE_BOARD_VISION_PROVIDER_CREATED");
         }
+
+        boardVisionProvider.SetAllowProvisionalCalibrationForValidation(allowProvisionalValidation);
+        Debug.Log(
+            $"DJI_PROVISIONAL_VALIDATION_INSPECTOR_SETTING asset=Assets/Resources/DjiBoardVisionValidationSettings.asset " +
+            $"enabled={allowProvisionalValidation} worldInitializationAllowed=false");
     }
 
     private static void DisableLegacyTestNavigation()

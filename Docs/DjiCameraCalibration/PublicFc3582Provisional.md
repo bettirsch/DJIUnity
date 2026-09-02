@@ -81,18 +81,28 @@ is the only state that can initialize the normal DJI world pose.
 1. Build and run a fresh Android player and confirm `DJI_RUNTIME_FRAME` is
    exactly 1920 x 1080, unmodified packed luma.
 2. Leave validation mode disabled for normal operation. To run the controlled
-   test, set `allowProvisionalCalibrationForValidation` on
-   `DjiBoardVisionProvider` before launch.
-   The log must show `USING_UNVALIDATED_PUBLIC_FC3582_CALIBRATION`.
+   test, select
+   `Assets/Resources/DjiBoardVisionValidationSettings.asset` in the Unity
+   Inspector and enable `allowProvisionalCalibrationForValidation` before the
+   Android build. DroneView loads this asset before it creates the runtime-only
+   `DjiBoardVisionProvider`. The log must show both
+   `DJI_PROVISIONAL_VALIDATION_INSPECTOR_SETTING enabled=True` and
+   `USING_UNVALIDATED_PUBLIC_FC3582_CALIBRATION`. This setting authorizes only
+   detector/PnP diagnostics; `DJI_WORLD_INITIALIZED` remains disabled.
 3. Use the physical 360 mm board at center, left, right, top, bottom, moderate
    X tilt, moderate Y tilt, near, and farther distance. Hold it still for at
    least ten seconds at each pose.
-4. Retain the logs for `DJI_BOARD_REPROJECTION_RMS`,
-   `DJI_BOARD_MAX_CORNER_ERROR`, `DJI_BOARD_POSE_JITTER_POSITION`, and
-   `DJI_BOARD_POSE_JITTER_ROTATION`. `DJI_PROVISIONAL_VALIDATION_COVERAGE`
-   breaks reprojection measurements down by image location and reports the
-   required test coverage. The existing cyan/yellow diagnostic overlay shows
-   projected and detected corners; RGB axes show the board pose.
+4. Retain the concise one-second diagnostic snapshots:
+   `DJI_RUNTIME_FRAME`, `DJI_BOARD_MARKERS_VISIBLE`,
+   `DJI_BOARD_CORNER_COUNT`, `DJI_BOARD_REPROJECTION_RMS`,
+   `DJI_BOARD_MAX_CORNER_ERROR`, `DJI_BOARD_POSITION_JITTER`, and
+   `DJI_BOARD_ROTATION_JITTER`. `DJI_BOARD_VALIDATION_BUCKET` reports the
+   active `CENTER`, `LEFT`, `RIGHT`, `TOP`, `BOTTOM`, `X_TILT`, `Y_TILT`,
+   `NEAR`, and `FAR` bucket(s); `DJI_PROVISIONAL_VALIDATION_COVERAGE` reports
+   coverage of each bucket. Five samples are required in every bucket before
+   coverage is complete, but no quality state is assigned automatically. The
+   existing cyan/yellow diagnostic overlay shows projected and detected
+   corners; RGB axes show the board pose.
 5. After reviewing the physical data, explicitly record either
    `SUFFICIENT` or `PHYSICAL_CALIBRATION_REQUIRED` through
    `TrySetProvisionalValidationResult`. The method rejects a decision before
