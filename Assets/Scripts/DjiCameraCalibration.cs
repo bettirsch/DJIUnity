@@ -12,6 +12,14 @@ public sealed class DjiCameraCalibration : MonoBehaviour
     private const string MeasuredResourceName = "DjiCameraCalibration";
     private const string ProvisionalResourceName = "DjiCameraCalibrationProvisionalFc3582";
 
+    public enum ValidationState
+    {
+        UNVALIDATED,
+        SUFFICIENT,
+        PHYSICAL_CALIBRATION_REQUIRED,
+        MEASURED_CALIBRATION
+    }
+
     [Serializable]
     public sealed class Data
     {
@@ -46,14 +54,17 @@ public sealed class DjiCameraCalibration : MonoBehaviour
         public string source = "UNCONFIGURED";
     }
 
-    [SerializeField] private bool allowProvisionalCalibrationForTesting;
+    [SerializeField] private bool allowProvisionalCalibrationForValidation;
+    [SerializeField] private ValidationState provisionalValidationState = ValidationState.UNVALIDATED;
+    [SerializeField] private int physicalValidationSampleCount;
+    [SerializeField] private bool physicalValidationCoverageComplete;
     [SerializeField] private Data measuredData = new();
     [SerializeField] private Data provisionalData = new();
 
     /// <summary>Measured data wins whenever it is structurally valid.</summary>
     public Data Current => HasMeasuredCalibration ? measuredData : HasProvisionalPublicCalibration ? provisionalData : measuredData;
     public float[] DistortionCoefficients => new[] { Current.k1, Current.k2, Current.p1, Current.p2, Current.k3 };
-    public bool AllowProvisionalCalibrationForTesting => allowProvisionalCalibrationForTesting;
+    public bool AllowProvisionalCalibrationForValidation => allowProvisionalCalibrationForValidation;
     public bool HasMeasuredCalibration =>
         IsStructurallyValid(measuredData) &&
         !measuredData.provisional &&
@@ -64,13 +75,23 @@ public sealed class DjiCameraCalibration : MonoBehaviour
         !provisionalData.isMeasuredCalibration &&
         provisionalData.status == "provisional_public_fc3582";
     public bool HasAvailableCalibration => HasMeasuredCalibration || HasProvisionalPublicCalibration;
+    public ValidationState CurrentValidationState => HasMeasuredCalibration
+        ? ValidationState.MEASURED_CALIBRATION
+        : HasProvisionalPublicCalibration ? provisionalValidationState : ValidationState.UNVALIDATED;
+    public bool HasPhysicalValidationEvidence => physicalValidationSampleCount > 0;
+    public bool HasSufficientPhysicalValidationEvidence => physicalValidationSampleCount >= 10 && physicalValidationCoverageComplete;
 
     /// <summary>
-    /// Only this property authorizes DJI_WORLD_INITIALIZED. The public profile
-    /// remains diagnostic-only until a caller deliberately opts in.
+    /// The public FC3582 profile may run the detector/PnP only to collect
+    /// validation measurements. It never authorizes world initialization.
     /// </summary>
-    public bool CanInitializeWorld => HasMeasuredCalibration ||
-                                      (allowProvisionalCalibrationForTesting && HasProvisionalPublicCalibration);
+    public bool CanRunBoardPoseDiagnostics => HasMeasuredCalibration ||
+                                              (allowProvisionalCalibrationForValidation && HasProvisionalPublicCalibration);
+
+    /// <summary>
+    /// Only a measured checkerboard calibration authorizes DJI_WORLD_INITIALIZED.
+    /// </summary>
+    public bool CanInitializeWorld => HasMeasuredCalibration;
 
     // Retained for existing callers; it now means safe world initialization.
     public bool HasUsableCalibration => CanInitializeWorld;
@@ -86,10 +107,62 @@ public sealed class DjiCameraCalibration : MonoBehaviour
                !calibration.mirrorX;
     }
 
-    public void SetAllowProvisionalCalibrationForTesting(bool allowed)
+    public void SetAllowProvisionalCalibrationForValidation(bool allowed)
     {
-        allowProvisionalCalibrationForTesting = allowed;
-        Debug.Log($"DJI_PROVISIONAL_CALIBRATION_MODE allowed={allowed} available={HasProvisionalPublicCalibration} measuredPreferred={HasMeasuredCalibration}");
+        allowProvisionalCalibrationForValidation = allowed;
+        Debug.Log($"DJI_PROVISIONAL_CALIBRATION_VALIDATION_MODE allowed={allowed} available={HasProvisionalPublicCalibration} state={CurrentValidationState}");
+    }
+
+    public void ResetProvisionalValidation()
+    {
+        if (!HasProvisionalPublicCalibration || HasMeasuredCalibration)
+            return;
+        physicalValidationSampleCount = 0;
+        physicalValidationCoverageComplete = false;
+        provisionalValidationState = ValidationState.UNVALIDATED;
+        LogValidationState("RESET");
+    }
+
+    public void RegisterPhysicalValidationObservation(int sampleCount, bool coverageComplete)
+    {
+        if (!HasProvisionalPublicCalibration || !allowProvisionalCalibrationForValidation || HasMeasuredCalibration)
+            return;
+        physicalValidationSampleCount = Mathf.Max(physicalValidationSampleCount, sampleCount);
+        physicalValidationCoverageComplete |= coverageComplete;
+    }
+
+    public bool TrySetProvisionalValidationResult(ValidationState requestedState, string evidenceSummary)
+    {
+        if (!HasProvisionalPublicCalibration || HasMeasuredCalibration)
+        {
+            Debug.LogWarning("PUBLIC_CALIBRATION_RESULT_REJECTED reason=PUBLIC_PROFILE_NOT_ACTIVE");
+            return false;
+        }
+
+        if (requestedState == ValidationState.UNVALIDATED)
+        {
+            ResetProvisionalValidation();
+            return true;
+        }
+
+        if (requestedState == ValidationState.MEASURED_CALIBRATION ||
+            (requestedState != ValidationState.SUFFICIENT && requestedState != ValidationState.PHYSICAL_CALIBRATION_REQUIRED))
+        {
+            Debug.LogWarning($"PUBLIC_CALIBRATION_RESULT_REJECTED requested={requestedState} reason=INVALID_PUBLIC_TRANSITION");
+            return false;
+        }
+
+        if (!HasSufficientPhysicalValidationEvidence || string.IsNullOrWhiteSpace(evidenceSummary))
+        {
+            Debug.LogWarning(
+                $"PUBLIC_CALIBRATION_RESULT_REJECTED requested={requestedState} reason=PHYSICAL_VALIDATION_EVIDENCE_INCOMPLETE " +
+                $"samples={physicalValidationSampleCount} coverageComplete={physicalValidationCoverageComplete}");
+            return false;
+        }
+
+        provisionalValidationState = requestedState;
+        LogValidationState($"evidence={evidenceSummary}");
+        return true;
     }
 
     private void Awake()
@@ -106,8 +179,10 @@ public sealed class DjiCameraCalibration : MonoBehaviour
             $"version={current.calibrationVersion} rotationDegrees={current.rotationDegrees} mirrorX={current.mirrorX} measured={HasMeasuredCalibration} " +
             $"provisionalAvailable={HasProvisionalPublicCalibration} worldInitializationAllowed={CanInitializeWorld}");
 
+        LogValidationState("STARTUP");
+
         if (HasProvisionalPublicCalibration && !CanInitializeWorld)
-            Debug.LogWarning("DJI_PROVISIONAL_CALIBRATION_DIAGNOSTIC_ONLY reason=ALLOW_PROVISIONAL_CALIBRATION_FOR_TESTING_FALSE");
+            Debug.LogWarning("DJI_PROVISIONAL_CALIBRATION_DIAGNOSTIC_ONLY reason=MEASURED_CALIBRATION_REQUIRED_FOR_WORLD_INITIALIZATION");
         else if (!HasAvailableCalibration)
             Debug.LogWarning("DJI_CAMERA_CALIBRATION_UNUSABLE reason=EXACT_CPU_FRAME_INTRINSICS_REQUIRED");
     }
@@ -118,6 +193,13 @@ public sealed class DjiCameraCalibration : MonoBehaviour
         if (json == null || string.IsNullOrWhiteSpace(json.text))
             return fallback;
         return JsonUtility.FromJson<Data>(json.text) ?? fallback;
+    }
+
+    private void LogValidationState(string context)
+    {
+        Debug.Log(
+            $"PUBLIC_CALIBRATION_RESULT = {CurrentValidationState} context={context} " +
+            $"physicalSamples={physicalValidationSampleCount} coverageComplete={physicalValidationCoverageComplete}");
     }
 
     private static bool IsStructurallyValid(Data calibration)

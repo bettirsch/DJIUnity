@@ -3,8 +3,8 @@
 `Assets/Resources/DjiCameraCalibrationProvisionalFc3582.json` is an
 **experimental** Mini 3 Pro / FC3582 profile for the actual DJI board-detector
 frame. It is never a measured calibration and cannot initialize
-`DJI_WORLD_INITIALIZED` unless `allowProvisionalCalibrationForTesting` is
-explicitly enabled. A valid measured `DjiCameraCalibration.json` always wins.
+`DJI_WORLD_INITIALIZED`, including during validation. A valid measured
+`DjiCameraCalibration.json` always wins.
 
 ## Detector frame
 
@@ -60,27 +60,51 @@ solve is the path that produces compatible Brown-Conrady coefficients.
 - Lensfun FC3582 camera/lens and PTLens coefficients: <https://github.com/lensfun/lensfun/blob/master/data/db/actioncams.xml>
 - Lensfun model documentation: <https://github.com/lensfun/lensfun/blob/master/docs/manual-main.txt>
 
-## Evaluation protocol
+## Validation State
+
+The public profile has an explicit state machine:
+
+| State | Meaning |
+| --- | --- |
+| `UNVALIDATED` | The public FC3582 profile exists, but no sufficient physical DJI ImageReader/reference-board data has been collected. This is the initial state. |
+| `SUFFICIENT` | Physical measurements have been collected and explicitly reviewed as acceptable for the prototype. |
+| `PHYSICAL_CALIBRATION_REQUIRED` | Physical measurements have been collected and explicitly show that the public profile is insufficient. |
+| `MEASURED_CALIBRATION` | A measured checkerboard calibration is active. |
+
+Missing measurements are unknown, not failure: the code rejects any request to
+move from `UNVALIDATED` to either final public-profile decision until it has
+recorded physical observations with complete coverage. A measured calibration
+is the only state that can initialize the normal DJI world pose.
+
+## Evaluation Protocol
 
 1. Build and run a fresh Android player and confirm `DJI_RUNTIME_FRAME` is
    exactly 1920 x 1080, unmodified packed luma.
-2. Leave prototype mode disabled for normal operation. To run the controlled
-   test, set `allowProvisionalCalibrationForTesting` on
+2. Leave validation mode disabled for normal operation. To run the controlled
+   test, set `allowProvisionalCalibrationForValidation` on
    `DjiBoardVisionProvider` before launch.
-3. Use the 360 mm board at center, left/right, upper/lower frame areas, varied
-   distance and moderate tilt. Hold it still for at least ten seconds at each
-   pose.
+   The log must show `USING_UNVALIDATED_PUBLIC_FC3582_CALIBRATION`.
+3. Use the physical 360 mm board at center, left, right, top, bottom, moderate
+   X tilt, moderate Y tilt, near, and farther distance. Hold it still for at
+   least ten seconds at each pose.
 4. Retain the logs for `DJI_BOARD_REPROJECTION_RMS`,
    `DJI_BOARD_MAX_CORNER_ERROR`, `DJI_BOARD_POSE_JITTER_POSITION`, and
-   `DJI_BOARD_POSE_JITTER_ROTATION`. The existing cyan/yellow diagnostic
-   overlay shows projected and detected corners; RGB axes show the board pose.
-5. Only a measured data set may establish
-   `PUBLIC_CALIBRATION_RESULT = SUFFICIENT`. With no physical metrics this
-   profile's current conclusion is:
+   `DJI_BOARD_POSE_JITTER_ROTATION`. `DJI_PROVISIONAL_VALIDATION_COVERAGE`
+   breaks reprojection measurements down by image location and reports the
+   required test coverage. The existing cyan/yellow diagnostic overlay shows
+   projected and detected corners; RGB axes show the board pose.
+5. After reviewing the physical data, explicitly record either
+   `SUFFICIENT` or `PHYSICAL_CALIBRATION_REQUIRED` through
+   `TrySetProvisionalValidationResult`. The method rejects a decision before
+   the physical coverage is complete; it does not derive a result from the
+   absence of data.
+
+With no physical metrics this profile's current result is:
 
 ```text
-PUBLIC_CALIBRATION_RESULT = PHYSICAL_CALIBRATION_REQUIRED
+PUBLIC_CALIBRATION_RESULT = UNVALIDATED
 ```
 
 The supplied checkerboard capture and offline solve remain the production
-fallback; public values do not overwrite their output.
+path if the public profile proves insufficient; public values do not overwrite
+their output.

@@ -2,7 +2,7 @@
   "calibrationVersion": "DJI_FC3582_PUBLIC_V1",
   "status": "provisional_public_fc3582",
   "sourceModel": "DJI Mini 3 Pro / FC3582",
-  "sourceNotes": "Experimental 1920x1080 profile. fx=fy are inferred from Lensfun's 6.7 mm nominal focal length and DJI's 1.197 um sensor-pixel specification, preserving the 8064-pixel sensor width through a centered 16:9 crop and scale to 1920 pixels. DJI lists FOV 82.1 degrees but does not label its direction; it is not used as a horizontal-FOV assumption. The derived diagonal FOV is only a consistency check. cx/cy assume an unshifted central crop. A physical checkerboard calibration remains required for production.",
+  "sourceNotes": "Experimental 1920x1080 profile. fx=fy are inferred from Lensfun's 6.7 mm nominal focal length and DJI's 1.197 um sensor-pixel specification, preserving the 8064-pixel sensor width through a centered 16:9 crop and scale to 1920 pixels. DJI lists FOV 82.1 degrees but does not label its direction; it is not used as a horizontal-FOV assumption. The derived diagonal FOV is only a consistency check. cx/cy assume an unshifted central crop. The profile is UNVALIDATED until physical ImageReader reference-board measurements are collected.",
   "sourceUrls": "https://www.dji.com/support/product/mini-3-pro ; https://github.com/lensfun/lensfun/blob/master/data/db/actioncams.xml",
   "imageWidth": 1920,
   "imageHeight": 1080,
@@ -27,5 +27,5 @@
   "rotationDegrees": 0,
   "mirrorX": false,
   "provisional": true,
-  "source": "PUBLIC_DJI_SPECS_PLUS_LENSFUN; PHYSICAL_CHECKERBOARD_REQUIRED"
+  "source": "PUBLIC_DJI_SPECS_PLUS_LENSFUN; UNVALIDATED"
 }

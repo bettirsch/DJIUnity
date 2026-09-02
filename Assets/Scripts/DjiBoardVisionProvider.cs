@@ -30,7 +30,7 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
     [Header("Diagnostics")]
     [SerializeField] private bool diagnosticLogging = true;
     [SerializeField, Min(0.1f)] private float diagnosticLogIntervalSeconds = 1f;
-    [SerializeField] private bool allowProvisionalCalibrationForTesting;
+    [SerializeField] private bool allowProvisionalCalibrationForValidation;
 
     public LocalizationState State { get; private set; } = LocalizationState.WaitingForReference;
     public bool HasVisualWorldPose { get; private set; }
@@ -54,10 +54,47 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
     private readonly List<float> _provisionalRotationDeltas = new();
     private Pose _lastProvisionalCameraFromBoard;
     private bool _hasLastProvisionalCameraFromBoard;
-    private int _provisionalCenterSamples;
-    private int _provisionalEdgeSamples;
     private int _provisionalSampleCount;
+    private readonly ValidationLocationStatistics[] _validationLocationStatistics =
+    {
+        new("CENTER"), new("LEFT"), new("RIGHT"), new("TOP"), new("BOTTOM")
+    };
+    private bool _observedModerateXTilt;
+    private bool _observedModerateYTilt;
+    private float _minimumValidationDistanceMeters = float.PositiveInfinity;
+    private float _maximumValidationDistanceMeters;
     private Texture2D _debugLineTexture;
+
+    private enum ValidationLocation
+    {
+        CENTER,
+        LEFT,
+        RIGHT,
+        TOP,
+        BOTTOM
+    }
+
+    private sealed class ValidationLocationStatistics
+    {
+        public readonly string Label;
+        public int Samples;
+        public float SumRms;
+        public float MaximumRms;
+        public float MaximumResidual;
+
+        public ValidationLocationStatistics(string label) => Label = label;
+
+        public void Add(NativeBoardResult result)
+        {
+            Samples++;
+            SumRms += result.reprojectionRms;
+            MaximumRms = Mathf.Max(MaximumRms, result.reprojectionRms);
+            MaximumResidual = Mathf.Max(MaximumResidual, result.maxResidual);
+        }
+
+        public string ToDiagnosticString() =>
+            $"{Label}:samples={Samples},meanRms={(Samples == 0 ? 0f : SumRms / Samples):F3},maxRms={MaximumRms:F3},maxResidual={MaximumResidual:F3}";
+    }
 
     [Serializable]
     public sealed class NativeBoardResult
@@ -90,7 +127,7 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
     private void Awake()
     {
         _calibration = GetComponent<DjiCameraCalibration>() ?? gameObject.AddComponent<DjiCameraCalibration>();
-        _calibration.SetAllowProvisionalCalibrationForTesting(allowProvisionalCalibrationForTesting);
+        _calibration.SetAllowProvisionalCalibrationForValidation(allowProvisionalCalibrationForValidation);
         _telemetryProvider = FindFirstObjectByType<DjiCameraPoseProvider>();
     }
 
@@ -143,6 +180,14 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
 
     private void ConfigureNativeCpuVision()
     {
+        if (!_calibration.CanRunBoardPoseDiagnostics)
+        {
+            Debug.LogWarning(
+                $"DJI_PROVISIONAL_VALIDATION_DISABLED state={_calibration.CurrentValidationState} " +
+                "reason=ALLOW_PROVISIONAL_CALIBRATION_FOR_VALIDATION_FALSE");
+            return;
+        }
+
         var layout = BuildNativeMarkerLayout(ReferenceBoardDefinition.Default.DjiFiducialMarkers);
         var data = _calibration.Current;
         DjiBoardVisionBridge.Configure(
@@ -161,14 +206,22 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
             $"markerCount={ReferenceBoardDefinition.Default.DjiFiducialMarkers.Count}");
         if (data.provisional)
         {
+            var profileMessage = _calibration.CurrentValidationState == DjiCameraCalibration.ValidationState.UNVALIDATED
+                ? "USING_UNVALIDATED_PUBLIC_FC3582_CALIBRATION"
+                : "USING_REVIEWED_PUBLIC_FC3582_CALIBRATION";
             Debug.Log(
-                $"DJI_PROVISIONAL_CALIBRATION_ACTIVE status={data.status} source={data.source} frame={data.imageWidth}x{data.imageHeight} " +
-                $"worldInitializationAllowed={_calibration.CanInitializeWorld} allowProvisionalCalibrationForTesting={_calibration.AllowProvisionalCalibrationForTesting}");
+                profileMessage + " " +
+                $"status={data.status} frame={data.imageWidth}x{data.imageHeight} " +
+                $"worldInitializationAllowed={_calibration.CanInitializeWorld} " +
+                $"allowProvisionalCalibrationForValidation={_calibration.AllowProvisionalCalibrationForValidation}");
         }
     }
 
     private IEnumerator StartWhenDjiVideoIsReady()
     {
+        if (!_calibration.CanRunBoardPoseDiagnostics)
+            yield break;
+
         var timeoutAt = Time.realtimeSinceStartup + 15f;
         var background = FindFirstObjectByType<DJIGPUBackground>();
         while ((background == null || !background.IsReady) && Time.realtimeSinceStartup < timeoutAt)
@@ -214,6 +267,14 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         Debug.Log($"DJI_BOARD_MAX_CORNER_ERROR pixels={result.maxResidual:F3}");
         RecordProvisionalDiagnostics(result, cameraFromBoard);
 
+        // Public intrinsics are used only for image-space validation. They
+        // must never compose a shared-world DJI camera pose.
+        if (_calibration.Current.provisional)
+        {
+            State = LocalizationState.Localizing;
+            return;
+        }
+
         if (!PersistentReferenceFrame.TryGetExisting(out var referenceFrame) || !referenceFrame.HasBoardPose)
         {
             State = LocalizationState.WaitingForReference;
@@ -247,13 +308,6 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
 
         _lastCandidateWorldPose = candidateWorldPose;
         _hasLastCandidate = true;
-
-        if (!_calibration.CanInitializeWorld)
-        {
-            State = LocalizationState.Localizing;
-            LogThrottled("DJI_WORLD_INITIALIZATION_BLOCKED reason=PROVISIONAL_CALIBRATION_DIAGNOSTIC_ONLY");
-            return;
-        }
 
         _consistentSampleCount++;
         State = LocalizationState.Localizing;
@@ -339,7 +393,7 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
 
     private void RecordProvisionalDiagnostics(NativeBoardResult result, Pose cameraFromBoard)
     {
-        if (!_calibration.Current.provisional)
+        if (!_calibration.Current.provisional || !_calibration.AllowProvisionalCalibrationForValidation)
             return;
 
         _provisionalSampleCount++;
@@ -353,11 +407,16 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
 
         _lastProvisionalCameraFromBoard = cameraFromBoard;
         _hasLastProvisionalCameraFromBoard = true;
-        var normalizedCenterOffset = GetMarkerCenterOffset(result);
-        if (normalizedCenterOffset <= 0.25f)
-            _provisionalCenterSamples++;
-        else
-            _provisionalEdgeSamples++;
+        var markerCenter = GetMarkerImageCenter(result);
+        var location = ClassifyValidationLocation(markerCenter, result);
+        _validationLocationStatistics[(int)location].Add(result);
+        var boardNormalInCamera = cameraFromBoard.rotation * Vector3.forward;
+        _observedModerateXTilt |= Mathf.Abs(boardNormalInCamera.x) >= 0.25f;
+        _observedModerateYTilt |= Mathf.Abs(boardNormalInCamera.y) >= 0.25f;
+        var distance = cameraFromBoard.position.magnitude;
+        _minimumValidationDistanceMeters = Mathf.Min(_minimumValidationDistanceMeters, distance);
+        _maximumValidationDistanceMeters = Mathf.Max(_maximumValidationDistanceMeters, distance);
+        _calibration.RegisterPhysicalValidationObservation(_provisionalSampleCount, HasCompleteValidationCoverage());
 
         if (_provisionalSampleCount % 10 != 0)
             return;
@@ -367,20 +426,24 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         Debug.Log(
             $"DJI_PROVISIONAL_CALIBRATION_STATS samples={_provisionalSampleCount} " +
             $"meanRmsPixels={Mean(_provisionalReprojectionRms):F3} medianRmsPixels={Median(_provisionalReprojectionRms):F3} " +
-            $"maxRmsPixels={Max(_provisionalReprojectionRms):F3} maxCornerResidualPixels={Max(_provisionalMaxResiduals):F3} " +
-            $"centerSamples={_provisionalCenterSamples} edgeSamples={_provisionalEdgeSamples}");
+            $"maxRmsPixels={Max(_provisionalReprojectionRms):F3} maxCornerResidualPixels={Max(_provisionalMaxResiduals):F3}");
         Debug.Log(
             $"DJI_BOARD_POSE_JITTER_POSITION samples={_provisionalPositionDeltas.Count} meters={RmsOrZero(_provisionalPositionDeltas):F5} " +
             $"condition=HOLD_CAMERA_STILL_FOR_STATIONARY_MEASUREMENT");
         Debug.Log(
             $"DJI_BOARD_POSE_JITTER_ROTATION samples={_provisionalRotationDeltas.Count} degrees={RmsOrZero(_provisionalRotationDeltas):F4} " +
             $"condition=HOLD_CAMERA_STILL_FOR_STATIONARY_MEASUREMENT");
+        Debug.Log(
+            $"DJI_PROVISIONAL_VALIDATION_COVERAGE {string.Join(";", Array.ConvertAll(_validationLocationStatistics, statistic => statistic.ToDiagnosticString()))} " +
+            $"moderateXTilt={_observedModerateXTilt} moderateYTilt={_observedModerateYTilt} " +
+            $"nearFarDistanceRangeMeters={_maximumValidationDistanceMeters - _minimumValidationDistanceMeters:F3} " +
+            $"complete={HasCompleteValidationCoverage()} state={_calibration.CurrentValidationState}");
     }
 
-    private static float GetMarkerCenterOffset(NativeBoardResult result)
+    private static Vector2 GetMarkerImageCenter(NativeBoardResult result)
     {
         if (result.markers == null || result.markers.Length == 0)
-            return 1f;
+            return new Vector2(result.frameWidth * 0.5f, result.frameHeight * 0.5f);
 
         var sum = Vector2.zero;
         var count = 0;
@@ -398,9 +461,36 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         }
 
         if (count == 0 || result.frameWidth <= 0 || result.frameHeight <= 0)
-            return 1f;
-        var normalized = new Vector2(sum.x / count / result.frameWidth - 0.5f, sum.y / count / result.frameHeight - 0.5f);
-        return normalized.magnitude;
+            return new Vector2(result.frameWidth * 0.5f, result.frameHeight * 0.5f);
+        return sum / count;
+    }
+
+    private static ValidationLocation ClassifyValidationLocation(Vector2 center, NativeBoardResult result)
+    {
+        var normalized = new Vector2(center.x / result.frameWidth, center.y / result.frameHeight);
+        if (normalized.x <= 1f / 3f)
+            return ValidationLocation.LEFT;
+        if (normalized.x >= 2f / 3f)
+            return ValidationLocation.RIGHT;
+        if (normalized.y <= 1f / 3f)
+            return ValidationLocation.TOP;
+        if (normalized.y >= 2f / 3f)
+            return ValidationLocation.BOTTOM;
+        return ValidationLocation.CENTER;
+    }
+
+    private bool HasCompleteValidationCoverage()
+    {
+        const float minimumNearFarDistanceRangeMeters = 0.15f;
+        foreach (var statistics in _validationLocationStatistics)
+        {
+            if (statistics.Samples == 0)
+                return false;
+        }
+
+        return _observedModerateXTilt &&
+               _observedModerateYTilt &&
+               _maximumValidationDistanceMeters - _minimumValidationDistanceMeters >= minimumNearFarDistanceRangeMeters;
     }
 
     private void LogThrottled(string message)
@@ -545,10 +635,20 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         return path;
     }
 
-    public void SetAllowProvisionalCalibrationForTesting(bool allowed)
+    public void SetAllowProvisionalCalibrationForValidation(bool allowed)
     {
-        allowProvisionalCalibrationForTesting = allowed;
-        _calibration.SetAllowProvisionalCalibrationForTesting(allowed);
+        allowProvisionalCalibrationForValidation = allowed;
+        _calibration.SetAllowProvisionalCalibrationForValidation(allowed);
+    }
+
+    public bool TrySetProvisionalValidationResult(DjiCameraCalibration.ValidationState result, string evidenceSummary)
+    {
+        return _calibration.TrySetProvisionalValidationResult(result, evidenceSummary);
+    }
+
+    public void ResetProvisionalValidation()
+    {
+        _calibration.ResetProvisionalValidation();
     }
 }
 

@@ -79,5 +79,6 @@ OpenCV coefficients unless its model is explicitly mapped to the exact
 unmodified ImageReader pixel coordinates.
 
 `PublicFc3582Provisional.md` documents the separate public-data prototype
-profile. It remains diagnostic-only by default; a measured checkerboard solve
-always takes precedence.
+profile. It remains `UNVALIDATED` until a physical reference-board run
+collects and reviews its reprojection and stability data; a measured
+checkerboard solve always takes precedence.
