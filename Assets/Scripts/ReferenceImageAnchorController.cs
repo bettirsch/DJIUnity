@@ -18,6 +18,12 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         Anchored
     }
 
+    private enum ReferenceFrameMode
+    {
+        LiveTrackingValidation,
+        FrozenReferenceFrame
+    }
+
     [Header("Reference image")]
 
     [Header("Content")]
@@ -32,11 +38,13 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     [SerializeField] private ReferenceActionUi referenceActionUi;
 
     [Header("Diagnostics")]
+    [SerializeField] private bool followTrackedImageDuringValidation = true;
     [SerializeField] private bool debugLogging = true;
     [SerializeField, Min(0.1f)] private float debugLogInterval = 1f;
 
     private ScanState _state;
     private ARAnchor _anchor;
+    private Transform _boardVisualRoot;
     private GameObject _cube;
     private Renderer _cubeRenderer;
     private bool _anchorCreationInProgress;
@@ -48,6 +56,9 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     private bool _sceneTransitionInProgress;
     private float _nextDebugLogTime;
     private int _scanGeneration;
+    private Pose _latestWorldFromTrackedImage;
+    private bool _hasLatestTrackedImagePose;
+    private ReferenceFrameMode _referenceFrameMode;
 
     public ARTrackedImageManager ConfiguredTrackedImageManager => trackedImageManager;
     public ARAnchorManager ConfiguredAnchorManager => anchorManager;
@@ -72,6 +83,9 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         _ = PersistentReferenceFrame.Instance;
         referenceActionUi ??= ReferenceActionUi.FindOrCreate();
         PrepareUi();
+        SetReferenceFrameMode(
+            followTrackedImageDuringValidation ? ReferenceFrameMode.LiveTrackingValidation : ReferenceFrameMode.FrozenReferenceFrame,
+            "CONFIGURATION");
         SetState(ScanState.Searching, "Tartsa a referencia-képet a telefon kameraképében.");
     }
 
@@ -94,11 +108,16 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     private void Update()
     {
+        if (_referenceFrameMode == ReferenceFrameMode.LiveTrackingValidation && _hasLatestTrackedImagePose)
+            FollowTrackedImageForValidation(_latestWorldFromTrackedImage, false);
+
         if (!debugLogging || _anchor == null || Time.unscaledTime < _nextDebugLogTime)
             return;
 
         _nextDebugLogTime = Time.unscaledTime + debugLogInterval;
         Debug.Log($"[Reference Image] state={_state} anchorPosition={_anchor.transform.position} anchorRotation={_anchor.transform.rotation.eulerAngles}");
+        if (_referenceFrameMode == ReferenceFrameMode.LiveTrackingValidation && _hasLatestTrackedImagePose)
+            LogLiveTrackingPose(_latestWorldFromTrackedImage, "UPDATE");
     }
 
     public void ResetScan()
@@ -121,6 +140,8 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         _anchor = null;
         _cube = null;
         _cubeRenderer = null;
+        _boardVisualRoot = null;
+        _hasLatestTrackedImagePose = false;
         _hasSeenReferenceImage = false;
         _targetImageAdded = false;
         _targetReachedTracking = false;
@@ -128,6 +149,9 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         _lastTrackingState = TrackingState.None;
         SetConnectDroneButtonVisible(false);
         SetRescanButtonVisible(false);
+        SetReferenceFrameMode(
+            followTrackedImageDuringValidation ? ReferenceFrameMode.LiveTrackingValidation : ReferenceFrameMode.FrozenReferenceFrame,
+            "RESET");
         SetState(ScanState.Searching, "Tartsa a referencia-képet a telefon kameraképében.");
     }
 
@@ -177,7 +201,13 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
         HandleTrackingState(trackedImage.trackingState);
         if (trackedImage.trackingState == TrackingState.Tracking)
+        {
             _targetReachedTracking = true;
+            _latestWorldFromTrackedImage = new Pose(trackedImage.transform.position, trackedImage.transform.rotation);
+            _hasLatestTrackedImagePose = true;
+            if (_referenceFrameMode == ReferenceFrameMode.LiveTrackingValidation)
+                FollowTrackedImageForValidation(_latestWorldFromTrackedImage, true);
+        }
 
         if (trackedImage.trackingState != TrackingState.Tracking || _anchor != null || _anchorCreationInProgress)
             return;
@@ -209,11 +239,22 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             _anchor.gameObject.name = "ReferenceImageAnchor";
             CreateContentHierarchy(_anchor.transform);
             Debug.Log($"[Reference Image] ANCHOR_CREATED position={_anchor.transform.position} rotation={_anchor.transform.rotation.eulerAngles}");
-            AcquirePersistentReferenceFrame(worldFromTrackedImage);
+            if (_referenceFrameMode == ReferenceFrameMode.LiveTrackingValidation)
+            {
+                FollowTrackedImageForValidation(worldFromTrackedImage, true);
+            }
+            else
+            {
+                FreezeReferenceFrame(worldFromTrackedImage, "ANCHOR_ACQUIRED");
+            }
             SetConnectDroneButtonVisible(true);
             SetRescanButtonVisible(true);
             referenceActionUi?.LogConfiguration("REFERENCE_ACQUIRED");
-            SetState(ScanState.Anchored, "Referencia-kép rögzítve. Csatlakoztassa a drónt.");
+            SetState(
+                ScanState.Anchored,
+                _referenceFrameMode == ReferenceFrameMode.LiveTrackingValidation
+                    ? "Referencia-kép élő validációban követve. Csatlakoztassa a drónt a pozíció rögzítéséhez."
+                    : "Referencia-kép rögzítve. Csatlakoztassa a drónt.");
         }
         catch (Exception exception)
         {
@@ -231,15 +272,15 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
 
     private void CreateContentHierarchy(Transform anchorTransform)
     {
-        var contentAlignment = new GameObject("ContentAlignment").transform;
-        contentAlignment.SetParent(anchorTransform, false);
+        _boardVisualRoot = new GameObject("ContentAlignment").transform;
+        _boardVisualRoot.SetParent(anchorTransform, false);
         // AR Foundation image pose uses local +Y as the image-plane normal. No Euler correction is applied.
-        contentAlignment.localPosition = Vector3.zero;
-        contentAlignment.localRotation = Quaternion.identity;
+        _boardVisualRoot.localPosition = Vector3.zero;
+        _boardVisualRoot.localRotation = Quaternion.identity;
 
         _cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
         _cube.name = "Cube";
-        _cube.transform.SetParent(contentAlignment, false);
+        _cube.transform.SetParent(_boardVisualRoot, false);
         _cube.transform.localScale = Vector3.one * cubeSizeMeters;
         // The cube's local bottom face rests on the reference-image plane at local Y = 0.
         _cube.transform.localPosition = Vector3.up * (cubeSizeMeters * 0.5f);
@@ -247,6 +288,8 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
         _cubeRenderer = _cube.GetComponent<Renderer>();
         if (_cubeRenderer != null)
             _cubeRenderer.material = CreateRuntimeMaterial(cubeColor);
+
+        CreateBoardDebugAxes(_boardVisualRoot);
 
         Debug.Log($"[Reference Image] CUBE_CREATED hierarchy={_cube.transform.GetHierarchyPath()} localPosition={_cube.transform.localPosition} localScale={_cube.transform.localScale}");
         Debug.Log($"[Reference Image] CUBE_ACTIVE activeSelf={_cube.activeSelf} activeInHierarchy={_cube.activeInHierarchy}");
@@ -345,6 +388,9 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
     private void LoadDroneView()
     {
         if (_sceneTransitionInProgress)
+            return;
+
+        if (_referenceFrameMode == ReferenceFrameMode.LiveTrackingValidation && !FreezeReferenceFrameForDroneView())
             return;
 
         if (!PersistentReferenceFrame.Instance.HasBoardPose)
@@ -478,6 +524,79 @@ public sealed class ReferenceImageAnchorController : MonoBehaviour
             Debug.LogError("[Persistent Reference] TRANSFORM_ROUND_TRIP_FAILED");
 
         DrawBoardAxes(worldFromBoard, 15f);
+    }
+
+    private bool FreezeReferenceFrameForDroneView()
+    {
+        if (!_hasLatestTrackedImagePose)
+        {
+            Debug.LogWarning("[Persistent Reference] REFERENCE_FRAME_FREEZE_BLOCKED reason=NO_TRACKING_POSE");
+            SetStatus("A referencia-képnek követhetőnek kell lennie a DroneView megnyitásához.");
+            return false;
+        }
+
+        FreezeReferenceFrame(_latestWorldFromTrackedImage, "DRONE_VIEW_HANDOFF");
+        return PersistentReferenceFrame.Instance.HasBoardPose;
+    }
+
+    private void FreezeReferenceFrame(Pose worldFromTrackedImage, string reason)
+    {
+        AcquirePersistentReferenceFrame(worldFromTrackedImage);
+        SetReferenceFrameMode(ReferenceFrameMode.FrozenReferenceFrame, reason);
+        Debug.Log(
+            $"PHONE_REFERENCE_FRAME_FROZEN pose=position:{worldFromTrackedImage.position} " +
+            $"rotation:{worldFromTrackedImage.rotation.eulerAngles} reason={reason}");
+    }
+
+    private void SetReferenceFrameMode(ReferenceFrameMode mode, string reason)
+    {
+        if (_referenceFrameMode == mode)
+            return;
+
+        var previous = _referenceFrameMode;
+        _referenceFrameMode = mode;
+        Debug.Log($"PHONE_REFERENCE_FRAME_MODE {previous} -> {mode} reason={reason}");
+    }
+
+    private void FollowTrackedImageForValidation(Pose worldFromTrackedImage, bool forceLog)
+    {
+        if (_boardVisualRoot == null)
+            return;
+
+        // The ARAnchor is deliberately left untouched; only this visual child follows the moving image.
+        _boardVisualRoot.SetPositionAndRotation(worldFromTrackedImage.position, worldFromTrackedImage.rotation);
+        if (forceLog || (debugLogging && Time.unscaledTime >= _nextDebugLogTime))
+            LogLiveTrackingPose(worldFromTrackedImage, forceLog ? "TRACKABLE_UPDATE" : "UPDATE");
+    }
+
+    private void LogLiveTrackingPose(Pose worldFromTrackedImage, string source)
+    {
+        Debug.Log(
+            $"PHONE_BOARD_TRACKING pose=position:{worldFromTrackedImage.position} " +
+            $"rotation:{worldFromTrackedImage.rotation.eulerAngles} source={source}");
+        Debug.Log("PHONE_CUBE_FOLLOWING_BOARD");
+    }
+
+    private static void CreateBoardDebugAxes(Transform boardVisualRoot)
+    {
+        const float axisLength = 0.10f;
+        const float axisThickness = 0.008f;
+        CreateBoardAxis(boardVisualRoot, "BoardAxisX", Vector3.right, Color.red, axisLength, axisThickness);
+        CreateBoardAxis(boardVisualRoot, "BoardAxisY", Vector3.up, Color.green, axisLength, axisThickness);
+        CreateBoardAxis(boardVisualRoot, "BoardAxisZ", Vector3.forward, Color.blue, axisLength, axisThickness);
+    }
+
+    private static void CreateBoardAxis(Transform parent, string name, Vector3 direction, Color color, float length, float thickness)
+    {
+        var axis = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        axis.name = name;
+        axis.transform.SetParent(parent, false);
+        axis.transform.localPosition = direction * (length * 0.5f);
+        axis.transform.localRotation = Quaternion.FromToRotation(Vector3.up, direction);
+        axis.transform.localScale = new Vector3(thickness, length, thickness);
+        var renderer = axis.GetComponent<Renderer>();
+        if (renderer != null)
+            renderer.material = CreateRuntimeMaterial(color);
     }
 
     private static void DrawBoardAxes(Pose worldFromBoard, float durationSeconds)

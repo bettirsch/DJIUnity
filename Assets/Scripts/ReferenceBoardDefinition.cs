@@ -52,6 +52,21 @@ public sealed class ReferenceBoardDefinition
 
     public bool MatchesPhoneReferenceImage(string imageName) => imageName == BuildingReferenceImageName;
 
+    public bool TryGetDjiFiducialMarker(string id, out FiducialMarkerDefinition marker)
+    {
+        foreach (var candidate in DjiMarkers)
+        {
+            if (candidate.Id == id)
+            {
+                marker = candidate;
+                return true;
+            }
+        }
+
+        marker = null;
+        return false;
+    }
+
     /// <summary>Extensible marker specification for future DJI visual localization.</summary>
     public sealed class FiducialMarkerDefinition
     {

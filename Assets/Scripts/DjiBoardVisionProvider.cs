@@ -113,6 +113,7 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         public string detectorFrameFormat;
         public bool calibrationUsable;
         public int status;
+        public string rejectionReason;
         public int markerCount;
         public int cornerCount;
         public float reprojectionRms;
@@ -146,17 +147,24 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
 
     private void Update()
     {
-        var json = DjiBoardVisionBridge.GetLatestResultJson();
-        if (string.IsNullOrWhiteSpace(json))
-            return;
+        try
+        {
+            var json = DjiBoardVisionBridge.GetLatestResultJson();
+            if (string.IsNullOrWhiteSpace(json))
+                return;
 
-        var result = JsonUtility.FromJson<NativeBoardResult>(json);
-        if (result == null || result.frameSequence == _lastFrameSequence)
-            return;
+            var result = JsonUtility.FromJson<NativeBoardResult>(json);
+            if (result == null || result.frameSequence == _lastFrameSequence)
+                return;
 
-        _lastFrameSequence = result.frameSequence;
-        LatestResult = result;
-        ProcessResult(result);
+            _lastFrameSequence = result.frameSequence;
+            LatestResult = result;
+            ProcessResult(result);
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError($"DJI_BOARD_UNITY_CALLBACK_FAILED exception={exception.GetType().Name} message={exception.Message}");
+        }
     }
 
     private void OnDestroy()
@@ -197,16 +205,24 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
 
         var layout = BuildNativeMarkerLayout(ReferenceBoardDefinition.Default.DjiFiducialMarkers);
         var data = _calibration.Current;
-        DjiBoardVisionBridge.Configure(
-            data.imageWidth,
-            data.imageHeight,
-            data.fx,
-            data.fy,
-            data.cx,
-            data.cy,
-            _calibration.DistortionCoefficients,
-            layout,
-            100);
+        try
+        {
+            DjiBoardVisionBridge.Configure(
+                data.imageWidth,
+                data.imageHeight,
+                data.fx,
+                data.fy,
+                data.cx,
+                data.cy,
+                _calibration.DistortionCoefficients,
+                layout,
+                100);
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError($"DJI_BOARD_JNI_CONFIGURE_FAILED exception={exception.GetType().Name} message={exception.Message}");
+            return;
+        }
         Debug.Log(
             $"DJI_REFERENCE_BOARD_LAYOUT widthMeters={ReferenceBoardDefinition.Default.WidthMeters:F3} heightMeters={ReferenceBoardDefinition.Default.HeightMeters:F3} " +
             $"phoneImageMeters={ReferenceBoardDefinition.Default.PhoneImageWidthMeters:F3}x{ReferenceBoardDefinition.Default.PhoneImageHeightMeters:F3} " +
@@ -237,10 +253,17 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
             yield return null;
         }
 
-        if (DjiBoardVisionBridge.Start())
-            Debug.Log("DJI_BOARD_CPU_VISION_STARTED source=ImageReader separateFromOes=true");
-        else
-            Debug.LogWarning("DJI_BOARD_CPU_VISION_START_FAILED");
+        try
+        {
+            if (DjiBoardVisionBridge.Start())
+                Debug.Log("DJI_BOARD_CPU_VISION_STARTED source=ImageReader separateFromOes=true");
+            else
+                Debug.LogWarning("DJI_BOARD_CPU_VISION_START_FAILED");
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError($"DJI_BOARD_JNI_START_FAILED exception={exception.GetType().Name} message={exception.Message}");
+        }
     }
 
     private void ProcessResult(NativeBoardResult result)
@@ -258,10 +281,24 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
             Debug.Log($"DJI_BOARD_CORNER_COUNT count={result.cornerCount}");
         }
 
+        if (result.status < 0)
+        {
+            Reject($"NATIVE_FRAME_REJECTED status={result.status} reason={result.rejectionReason}");
+            Debug.LogWarning($"DJI_BOARD_FRAME_REJECTED reason={result.rejectionReason} nativeStatus={result.status}");
+            return;
+        }
+
         if (result.markerCount == 0)
         {
             if (State != LocalizationState.DjiWorldInitialized)
                 State = LocalizationState.WaitingForReference;
+            return;
+        }
+
+        if (!ValidateNativeResult(result, out var validationReason))
+        {
+            Reject($"UNITY_RESULT_VALIDATION_FAILED reason={validationReason}");
+            Debug.LogWarning($"DJI_BOARD_FRAME_REJECTED reason={validationReason}");
             return;
         }
 
@@ -367,6 +404,11 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
             return false;
 
         var rotation = result.cameraFromBoardRotationMatrix;
+        for (var index = 0; index < rotation.Length; index++)
+        {
+            if (!float.IsFinite(rotation[index]))
+                return false;
+        }
         var matrix = Matrix4x4.identity;
         matrix.m00 = rotation[0]; matrix.m01 = rotation[1]; matrix.m02 = rotation[2];
         matrix.m10 = rotation[3]; matrix.m11 = rotation[4]; matrix.m12 = rotation[5];
@@ -376,6 +418,57 @@ public sealed class DjiBoardVisionProvider : MonoBehaviour
         matrix.m23 = result.cameraFromBoardPosition[2];
         cameraFromBoard = ReferenceFrameTransforms.PoseFromMatrix(matrix);
         return float.IsFinite(cameraFromBoard.position.x) && float.IsFinite(cameraFromBoard.position.y) && float.IsFinite(cameraFromBoard.position.z);
+    }
+
+    private static bool ValidateNativeResult(NativeBoardResult result, out string reason)
+    {
+        reason = string.Empty;
+        if (result.markers == null || result.markers.Length != result.markerCount)
+        {
+            reason = "MARKER_RESULT_COUNT_MISMATCH";
+            return false;
+        }
+
+        var expectedCorners = 0;
+        foreach (var marker in result.markers)
+        {
+            if (marker == null || !ReferenceBoardDefinition.Default.TryGetDjiFiducialMarker(marker.id.ToString(), out _))
+            {
+                reason = "MARKER_ID_NOT_IN_REFERENCE_BOARD_DEFINITION";
+                return false;
+            }
+
+            if (!float.IsFinite(marker.decisionMargin) || !ValidateCornerArray(marker.detectedCorners) ||
+                (result.status == 2 && !ValidateCornerArray(marker.projectedCorners)))
+            {
+                reason = "MARKER_CORNERS_INVALID";
+                return false;
+            }
+
+            expectedCorners += marker.detectedCorners.Length;
+        }
+
+        if (expectedCorners != result.cornerCount || result.cornerCount < 4)
+        {
+            reason = "CORRESPONDENCE_COUNT_MISMATCH";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool ValidateCornerArray(float[][] corners)
+    {
+        if (corners == null || corners.Length != 4)
+            return false;
+
+        foreach (var corner in corners)
+        {
+            if (corner == null || corner.Length != 2 || !float.IsFinite(corner[0]) || !float.IsFinite(corner[1]))
+                return false;
+        }
+
+        return true;
     }
 
     private void Reject(string reason)
