@@ -12,4 +12,4 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9f7b01f45fd14e0f9a9e73566f011d32, type: 3}
   m_Name: DjiBoardVisionValidationSettings
   m_EditorClassIdentifier:
-  allowProvisionalCalibrationForValidation: 0
+  allowProvisionalCalibrationForValidation: 1
