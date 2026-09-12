@@ -1,0 +1,134 @@
+using UnityEngine;
+using UnityEngine.Rendering.Universal;
+using UnityEngine.SceneManagement;
+
+internal static class DJIDroneViewBootstrap
+{
+    internal const string DroneViewSceneName = "DroneView";
+    private const string DroneCameraName = "DJI Drone View Camera";
+    private const string RuntimeDiagnosticsName = "DJI Drone View Runtime Diagnostics";
+    private const string CameraPoseProviderName = "DJI Camera Telemetry Pose Provider";
+    private const string BoardVisionProviderName = "DJI Reference Board Vision Provider";
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+    private static void RegisterSceneCallbacks()
+    {
+        SceneManager.sceneLoaded -= OnSceneLoaded;
+        SceneManager.sceneLoaded += OnSceneLoaded;
+        SceneManager.activeSceneChanged -= OnActiveSceneChanged;
+        SceneManager.activeSceneChanged += OnActiveSceneChanged;
+    }
+
+    private static void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+    {
+        if (scene.name != DroneViewSceneName)
+            return;
+
+        InstallForDroneView();
+    }
+
+    private static void OnActiveSceneChanged(Scene previousScene, Scene nextScene)
+    {
+        Debug.Log($"ACTIVE_SCENE_CHANGED {previousScene.name} -> {nextScene.name}");
+    }
+
+    private static void InstallForDroneView()
+    {
+        DisableLegacyTestNavigation();
+
+        var background = Object.FindFirstObjectByType<DJIGPUBackground>(FindObjectsInactive.Include);
+        if (background == null)
+        {
+            var cameraObject = new GameObject(
+                DroneCameraName,
+                typeof(Camera),
+                typeof(AudioListener),
+                typeof(UniversalAdditionalCameraData));
+            cameraObject.tag = "MainCamera";
+
+            var camera = cameraObject.GetComponent<Camera>();
+            camera.clearFlags = CameraClearFlags.SolidColor;
+            camera.backgroundColor = Color.black;
+
+            background = cameraObject.AddComponent<DJIGPUBackground>();
+            var backgroundShader = Shader.Find("DJI/OESBackgroundURP");
+            if (backgroundShader != null)
+                background.backgroundMat = new Material(backgroundShader);
+
+            background.verboseLogs = false;
+            Debug.Log("DJI_BOOTSTRAP_STATE=VIDEO_CAMERA_CREATED");
+        }
+        else
+        {
+            Debug.Log($"DJI_BOOTSTRAP_STATE=EXISTING_VIDEO_BACKGROUND object={background.gameObject.name}");
+        }
+
+        if (Object.FindFirstObjectByType<DjiDroneViewRuntimeDiagnostics>(FindObjectsInactive.Include) == null)
+        {
+            var diagnosticsObject = new GameObject(RuntimeDiagnosticsName);
+            diagnosticsObject.AddComponent<DjiDroneViewRuntimeDiagnostics>();
+        }
+
+        if (Object.FindFirstObjectByType<DjiCameraPoseProvider>(FindObjectsInactive.Include) == null)
+        {
+            var poseProviderObject = new GameObject(CameraPoseProviderName);
+            var poseProvider = poseProviderObject.AddComponent<DjiCameraPoseProvider>();
+            poseProvider.ConfigureDiagnosticLogging(true, 1f);
+            Debug.Log("DJI_BOOTSTRAP_STATE=CAMERA_TELEMETRY_PROVIDER_CREATED");
+        }
+
+        var validationSettings = Resources.Load<DjiBoardVisionValidationSettings>(DjiBoardVisionValidationSettings.ResourceName);
+        var allowProvisionalValidation = validationSettings != null && validationSettings.allowProvisionalCalibrationForValidation;
+        var boardVisionProvider = Object.FindFirstObjectByType<DjiBoardVisionProvider>(FindObjectsInactive.Include);
+        if (boardVisionProvider == null)
+        {
+            var boardVisionObject = new GameObject(BoardVisionProviderName);
+            boardVisionObject.AddComponent<DjiCameraCalibration>();
+            boardVisionProvider = boardVisionObject.AddComponent<DjiBoardVisionProvider>();
+            Debug.Log("DJI_BOOTSTRAP_STATE=REFERENCE_BOARD_VISION_PROVIDER_CREATED");
+        }
+
+        boardVisionProvider.SetAllowProvisionalCalibrationForValidation(allowProvisionalValidation);
+        Debug.Log(
+            $"DJI_PROVISIONAL_VALIDATION_INSPECTOR_SETTING asset=Assets/Resources/DjiBoardVisionValidationSettings.asset " +
+            $"enabled={allowProvisionalValidation} worldInitializationAllowed=false");
+    }
+
+    private static void DisableLegacyTestNavigation()
+    {
+        var legacyNavigation = GameObject.Find("Deprecated DroneView Test Navigation");
+        if (legacyNavigation != null)
+            legacyNavigation.SetActive(false);
+    }
+}
+
+internal sealed class DjiDroneViewRuntimeDiagnostics : MonoBehaviour
+{
+    private void Start()
+    {
+        Debug.Log("DRONEVIEW_SCENE_STARTED");
+        PersistentReferenceFrameScene2Diagnostics.LogForDroneView();
+        LogDjiPipelineState("SCENE_START");
+        StartCoroutine(LogDelayedPipelineState());
+    }
+
+    private System.Collections.IEnumerator LogDelayedPipelineState()
+    {
+        yield return new WaitForSecondsRealtime(2f);
+        LogDjiPipelineState("AFTER_2_SECONDS");
+        yield return new WaitForSecondsRealtime(18f);
+        LogDjiPipelineState("AFTER_20_SECONDS");
+    }
+
+    private static void LogDjiPipelineState(string checkpoint)
+    {
+        var bootstrap = Object.FindFirstObjectByType<DJIBootstrap>(FindObjectsInactive.Include);
+        var background = Object.FindFirstObjectByType<DJIGPUBackground>(FindObjectsInactive.Include);
+        Debug.Log(
+            $"DJI_BOOTSTRAP_STATE={checkpoint} sceneBootstrapPresent={bootstrap != null} " +
+            $"videoBackgroundPresent={background != null}");
+        Debug.Log(
+            $"DJI_VIDEO_PIPELINE_STATE={checkpoint} ready={background != null && background.IsReady} " +
+            $"externalTextureId={(background != null ? background.ExternalTextureId : 0)}");
+    }
+}
