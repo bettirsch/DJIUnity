@@ -3,11 +3,15 @@
 # =========================
 [Ll]ibrary/
 [Tt]emp/
+# XR Simulation creates this folder during player builds. Its folder meta can
+# survive a canceled build even though the generated contents are ignored.
+Assets/XR/Temp.meta
 [Oo]bj/
 [Bb]uild/
 [Bb]uilds/
 [Ll]ogs/
 [Mm]emoryCaptures/
+/TestResults/
 
 # Local user settings
 [Uu]ser[Ss]ettings/
@@ -66,6 +70,8 @@ desktop.ini
 *.tmp
 *.bak
 *.swp
+__pycache__/
+*.pyc
 
 # =========================
 # Crash reports

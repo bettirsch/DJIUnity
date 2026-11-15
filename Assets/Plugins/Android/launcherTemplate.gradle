@@ -2,6 +2,12 @@ apply plugin: 'com.android.application'
 apply from: 'setupSymbols.gradle'
 apply from: '../shared/keepUnitySymbols.gradle'
 
+def djiApiKey = providers.gradleProperty('DJI_API_KEY')
+    .orElse(providers.environmentVariable('DJI_API_KEY')).getOrNull()
+if (!djiApiKey?.trim()) {
+    throw new GradleException('Set DJI_API_KEY in the build environment or local Gradle user properties.')
+}
+
 dependencies {
     implementation project(':unityLibrary')
 }
@@ -23,6 +29,7 @@ android {
         minSdk 24
         targetSdk 36
         applicationId '**APPLICATIONID**'
+        manifestPlaceholders['DJI_API_KEY'] = djiApiKey
         ndk {
             abiFilters **ABIFILTERS**
             debugSymbolLevel **DEBUGSYMBOLLEVEL**

@@ -50,11 +50,11 @@ If it does not match, DJI SDK registration fails and the app will not receive th
 
 ## DJI API Key Note
 
-The DJI API key is not stored in Unity project files.
+The tracked `Assets/Plugins/Android/DJIUnityBridge.aar` contains the
+bridge and its native plugin, but no key. When building an Android application,
+provide `DJI_API_KEY` in the environment before starting Unity, or set it in
+the local Gradle user `gradle.properties`. The launcher resolves the manifest
+placeholder during packaging. Keep the key out of both repositories.
 
-It is injected from the `DJIBridge` project during the Android AAR build, using:
-
-- `DJIBridge/local.properties`
-- or `DJI_API_KEY` from Gradle/environment
-
-So before rebuilding the Unity app, make sure the `DJIBridge` AAR was built locally with a valid key.
+See [development validation](Docs/DevelopmentValidation.md) for the bridge
+build and optional replay test inputs.

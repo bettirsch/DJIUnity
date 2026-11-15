@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 2,
+  "version": "LONG_RANGE_V2",
+  "coordinateConvention": {
+    "origin": "physical board center",
+    "xAxis": "print-right",
+    "yAxis": "print-up",
+    "zAxis": "outward from printed surface"
+  },
+  "board": {
+    "widthM": 0.36,
+    "heightM": 0.36
+  },
+  "buildingReference": {
+    "widthM": 0.13,
+    "heightM": 0.13
+  },
+  "printedAprilTagTile": {
+    "family": "tagStandard41h12",
+    "widthM": 0.17,
+    "heightM": 0.17
+  },
+  "detectorQuad": {
+    "widthAtBorderModules": 5,
+    "totalWidthModules": 9,
+    "reversedBorder": true,
+    "sizeM": 0.09444444444444444
+  },
+  "markerCenterSpacingM": 0.18,
+  "markerFrame": {
+    "xAxis": "print-right",
+    "yAxis": "print-down",
+    "zAxis": "into board",
+    "boardFromMarkerEulerDegrees": {
+      "x": 180.0,
+      "y": 0.0,
+      "z": 0.0
+    }
+  },
+  "markers": [
+    {
+      "id": "0",
+      "centerM": { "x": -0.09, "y": 0.09, "z": 0.0 },
+      "printedRotationDegrees": 0.0
+    },
+    {
+      "id": "1",
+      "centerM": { "x": 0.09, "y": 0.09, "z": 0.0 },
+      "printedRotationDegrees": 0.0
+    },
+    {
+      "id": "2",
+      "centerM": { "x": -0.09, "y": -0.09, "z": 0.0 },
+      "printedRotationDegrees": 0.0
+    },
+    {
+      "id": "3",
+      "centerM": { "x": 0.09, "y": -0.09, "z": 0.0 },
+      "printedRotationDegrees": 0.0
+    }
+  ],
+  "printLayout": {
+    "outerMarginM": 0.005,
+    "innerGapM": 0.01,
+    "a4TiledPrint": {
+      "pageWidthM": 0.21,
+      "pageHeightM": 0.297,
+      "columns": 2,
+      "rows": 2,
+      "overlapM": 0.01
+    },
+    "verificationRuler": {
+      "startXM": 0.13,
+      "endXM": 0.23,
+      "yM": 0.0025
+    }
+  }
+}

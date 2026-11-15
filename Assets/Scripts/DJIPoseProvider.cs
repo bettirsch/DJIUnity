@@ -41,4 +41,37 @@ public static class DJIPoseProvider
         return false;
 #endif
     }
+
+    public static bool StartRawTelemetryCallbackLogging(string telemetrySessionId)
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        try
+        {
+            using var bridge = new AndroidJavaClass(BridgeClassName);
+            return bridge.CallStatic<bool>("startRawTelemetryCallbackLogging", telemetrySessionId);
+        }
+        catch (AndroidJavaException e)
+        {
+            Debug.LogWarning("[DJI] Failed to start raw telemetry callback logging: " + e.Message);
+            return false;
+        }
+#else
+        return false;
+#endif
+    }
+
+    public static void StopRawTelemetryCallbackLogging()
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        try
+        {
+            using var bridge = new AndroidJavaClass(BridgeClassName);
+            bridge.CallStatic("stopRawTelemetryCallbackLogging");
+        }
+        catch (AndroidJavaException e)
+        {
+            Debug.LogWarning("[DJI] Failed to stop raw telemetry callback logging: " + e.Message);
+        }
+#endif
+    }
 }

@@ -1,0 +1,20 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3b53c94d67bc4fd98373708f40f43869, type: 3}
+  m_Name: RoofCanopyWallShadowExperiment
+  m_EditorClassIdentifier: 
+  geometryVerified: 1
+  sourceFbxSha256: 0B5631931F3070D7CECA7C6DF74E5DBF547C47FD25B93D22A274DF4767D0D09C
+  wallOffset: -0.0036760657
+  wallCenterX: 2.4
+  wallWidth: 7
+  wallHeight: 3.2

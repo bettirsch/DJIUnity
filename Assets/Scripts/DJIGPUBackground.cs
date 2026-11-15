@@ -10,6 +10,11 @@ public sealed class DJIGPUBackground : MonoBehaviour
     [DllImport("djiunity")] private static extern IntPtr DJI_GetRenderEventFunc();
     [DllImport("djiunity")] private static extern void DJI_BeginCreateOESTexture(int reqW, int reqH);
     [DllImport("djiunity")] private static extern int DJI_GetTextureId();
+    [DllImport("djiunity")] private static extern void DJI_RecordOesFrameAvailable();
+    [DllImport("djiunity")] private static extern long DJI_GetLastOesFrameAvailableTimestampNs();
+    [DllImport("djiunity")] private static extern long DJI_GetLastOesFrameAvailableSequence();
+    [DllImport("djiunity")] private static extern long DJI_GetLastOesLatchTimestampNs();
+    [DllImport("djiunity")] private static extern long DJI_GetLastOesLatchSequence();
     [DllImport("djiunity")] private static extern void DJI_GetSurfaceTextureTransform([Out] float[] outMatrix16);
     [DllImport("djiunity")] private static extern void DJI_SetSurfaceTexture(IntPtr surfaceTex);
     [DllImport("djiunity")] private static extern void DJI_ClearSurfaceTexture();
@@ -58,6 +63,62 @@ public sealed class DJIGPUBackground : MonoBehaviour
 
     /// <summary> The GL texture id created by native (OES). Useful for debugging. </summary>
     public int ExternalTextureId => _texId;
+
+    /// <summary>
+    /// Timing for the image most recently latched into the OES texture. The
+    /// sequence identifies OES latches, not an MSDK source frame/PTS.
+    /// </summary>
+    public readonly struct DisplayedFrameTiming
+    {
+        public readonly long oesFrameAvailableSequence;
+        public readonly long oesFrameAvailableTimestampNs;
+        public readonly long oesLatchSequence;
+        public readonly long oesLatchTimestampNs;
+
+        public DisplayedFrameTiming(
+            long oesFrameAvailableSequence,
+            long oesFrameAvailableTimestampNs,
+            long oesLatchSequence,
+            long oesLatchTimestampNs)
+        {
+            this.oesFrameAvailableSequence = oesFrameAvailableSequence;
+            this.oesFrameAvailableTimestampNs = oesFrameAvailableTimestampNs;
+            this.oesLatchSequence = oesLatchSequence;
+            this.oesLatchTimestampNs = oesLatchTimestampNs;
+        }
+
+        public bool HasFrameAvailableTimestamp =>
+            oesFrameAvailableSequence > 0L && oesFrameAvailableTimestampNs > 0L;
+
+        public bool HasLatchTimestamp => oesLatchSequence > 0L && oesLatchTimestampNs > 0L;
+
+        public bool IsValid => HasFrameAvailableTimestamp || HasLatchTimestamp;
+    }
+
+    public static bool TryGetLatestDisplayedFrameTiming(out DisplayedFrameTiming timing)
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        // A latch can occur on the render thread while this is read. Accept a
+        // sample only when its sequence stayed stable across both reads.
+        var firstArrivalSequence = DJI_GetLastOesFrameAvailableSequence();
+        var arrivalTimestampNs = DJI_GetLastOesFrameAvailableTimestampNs();
+        var secondArrivalSequence = DJI_GetLastOesFrameAvailableSequence();
+        var firstLatchSequence = DJI_GetLastOesLatchSequence();
+        var latchTimestampNs = DJI_GetLastOesLatchTimestampNs();
+        var secondLatchSequence = DJI_GetLastOesLatchSequence();
+        timing = new DisplayedFrameTiming(
+            secondArrivalSequence,
+            arrivalTimestampNs,
+            secondLatchSequence,
+            latchTimestampNs);
+        return firstArrivalSequence == secondArrivalSequence &&
+               firstLatchSequence == secondLatchSequence &&
+               timing.IsValid;
+#else
+        timing = default;
+        return false;
+#endif
+    }
 
     /// <summary>
     /// Bind the current external texture to the given material.
@@ -149,6 +210,9 @@ public sealed class DJIGPUBackground : MonoBehaviour
         // Called on a Java thread chosen by SurfaceTexture (or handler thread if provided).
         public void onFrameAvailable(AndroidJavaObject st)
         {
+            // Native CLOCK_BOOTTIME capture keeps this SurfaceTexture arrival
+            // signal in the same domain as elapsedRealtimeNanos diagnostics.
+            DJI_RecordOesFrameAvailable();
             Interlocked.Exchange(ref _framePending, 1);
         }
     }
