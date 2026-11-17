@@ -5,6 +5,8 @@ using UnityEngine;
 
 public sealed class DjiContentAcquisitionVisibilityTests
 {
+    private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+    private ARContentType _selection;
     private GameObject _overlayObject;
     private GameObject _providerObject;
     private GameObject _videoObject;
@@ -13,16 +15,18 @@ public sealed class DjiContentAcquisitionVisibilityTests
     private ARContentType _previousSelection;
 
     [SetUp]
-    public void SetUp()
+    public void SetUp() => _previousSelection = ARContentSelection.Selected;
+
+    private void CreateOverlay(ARContentType selection = ARContentType.RoofCanopy)
     {
-        _previousSelection = ARContentSelection.Selected;
-        ARContentSelection.Set(ARContentType.RoofCanopy);
+        _selection = selection;
+        ARContentSelection.Set(_selection);
         _videoObject = new GameObject("Visibility test video camera", typeof(Camera));
         _providerObject = new GameObject("Visibility test provider");
         _provider = _providerObject.AddComponent<DjiBoardVisionProvider>();
         _overlayObject = new GameObject("Visibility test overlay");
         _overlay = _overlayObject.AddComponent<DjiSharedReferenceCubeOverlay>();
-        _overlay.Configure(_videoObject.GetComponent<Camera>(), _provider, true);
+        _overlay.Configure(_videoObject.GetComponent<Camera>(), _provider);
     }
 
     [TearDown]
@@ -39,16 +43,19 @@ public sealed class DjiContentAcquisitionVisibilityTests
     }
 
     [Test]
-    public void Creation_WithCachedFalse_ActuallyDisablesEveryRoofRenderer()
+    public void Creation_WithCachedFalse_ActuallyDisablesEveryModelRenderer()
     {
+        CreateOverlay();
         Assert.That(Field<bool>("_cubeVisible"), Is.False);
-        Assert.That(Field<GameObject>("_cube").name, Is.EqualTo("RoofCanopyPlacement"));
+        Assert.That(Field<GameObject>("_cube").name, Is.EqualTo(
+            _selection == ARContentType.RoofCanopy ? "RoofCanopyPlacement" : ReferenceBoardContentDefinition.DummyCubeName));
         AssertVisibility(false);
     }
 
     [Test]
     public void TelemetryOrPendingVisual_CannotShowContentBeforeAuthoritativeAcquisition()
     {
+        CreateOverlay();
         RequestVisibility(true);
         AssertVisibility(false);
         Assert.That(_provider.HasHighConfidenceCameraFromBoard, Is.False);
@@ -57,6 +64,7 @@ public sealed class DjiContentAcquisitionVisibilityTests
     [Test]
     public void AuthoritativeVisualEvent_AllowsVisibilityOnTheNextResolvedRender()
     {
+        CreateOverlay();
         PublishAuthoritativeVisual();
         AssertVisibility(false);
         RequestVisibility(true);
@@ -66,6 +74,7 @@ public sealed class DjiContentAcquisitionVisibilityTests
     [Test]
     public void LaterVisualLoss_DoesNotClearPermissionForPropagatedRendering()
     {
+        CreateOverlay();
         PublishAuthoritativeVisual();
         RequestVisibility(true);
         Assert.That(_provider.HasHighConfidenceCameraFromBoard, Is.False);
@@ -80,13 +89,14 @@ public sealed class DjiContentAcquisitionVisibilityTests
     [Test]
     public void NewProviderSession_RequiresItsOwnFirstAuthoritativeAcquisition()
     {
+        CreateOverlay();
         PublishAuthoritativeVisual();
         RequestVisibility(true);
         var newProviderObject = new GameObject("New visibility session");
         try
         {
             var nextProvider = newProviderObject.AddComponent<DjiBoardVisionProvider>();
-            _overlay.Configure(_videoObject.GetComponent<Camera>(), nextProvider, true);
+            _overlay.Configure(_videoObject.GetComponent<Camera>(), nextProvider);
             PublishAuthoritativeVisual();
             RequestVisibility(true);
             AssertVisibility(false);
@@ -96,6 +106,97 @@ public sealed class DjiContentAcquisitionVisibilityTests
             UnityEngine.Object.DestroyImmediate(newProviderObject);
         }
     }
+
+    [TestCase(ARContentType.RoofCanopy)]
+    [TestCase(ARContentType.Cube)]
+    public void Fc3582AcceptedVisualPose_InitializesWorldAndRendersWithExistingProjection(ARContentType selection)
+    {
+        CreateOverlay(selection);
+        var world = _providerObject.AddComponent<DjiWorldLocalizationShadow>();
+        world.Configure(_provider);
+        _provider.ConfigureWorldLocalizationShadow(world);
+
+        RenderFrame();
+        AssertVisibility(false);
+        Assert.That(world.Snapshot.hasWorld, Is.False);
+
+        for (var i = 1; i <= 3; i++)
+            ProcessNativeFrame(i);
+        RenderFrame();
+
+        Assert.That(_provider.HasHighConfidenceCameraFromBoard, Is.True);
+        Assert.That(world.Snapshot.hasWorld, Is.True);
+        AssertVisibility(true);
+        Assert.That(_overlay.DisplayedRenderPoseSource, Is.EqualTo(DjiRenderPoseSource.Visual));
+        var camera = Field<Camera>("_overlayCamera");
+        var expected = DjiSharedReferenceCubeOverlay.NativeOpticalToUnityViewBasis *
+                       ReferenceFrameTransforms.MatrixFromPose(_provider.CurrentHighConfidenceCameraFromBoard);
+        Assert.That(camera.worldToCameraMatrix, Is.EqualTo(expected));
+        const float near = 0.01f;
+        var previousFrustum = Matrix4x4.Frustum(-960f / 1332.7f * near, 960f / 1332.7f * near,
+            -540f / 1332.7f * near, 540f / 1332.7f * near, near, 100f);
+        Assert.That(camera.projectionMatrix, Is.EqualTo(previousFrustum));
+        Assert.That(DjiFc3582CameraModel.CreateDistortionCoefficients(), Is.EqualTo(new float[5]));
+    }
+
+    [TestCase("YUV_420_888_LUMA8", 1920, 1080, 0, "NONE", "NONE", false, true)]
+    [TestCase("NV21_LUMA8", 1280, 1080, 0, "NONE", "NONE", false, true)]
+    [TestCase("NV21_LUMA8", 1920, 720, 0, "NONE", "NONE", false, true)]
+    [TestCase("NV21_LUMA8", 1920, 1080, 90, "NONE", "NONE", false, true)]
+    [TestCase("NV21_LUMA8", 1920, 1080, 0, "CENTER", "NONE", false, true)]
+    [TestCase("NV21_LUMA8", 1920, 1080, 0, "NONE", "SCALED", false, true)]
+    [TestCase("NV21_LUMA8", 1920, 1080, 0, "NONE", "NONE", true, true)]
+    [TestCase("NV21_LUMA8", 1920, 1080, 0, "NONE", "NONE", false, false)]
+    public void IncompatibleDetectorResult_CannotEstablishAR(string format, int width, int height,
+        int rotation, string crop, string resize, bool mirrorX, bool calibrationUsable)
+    {
+        CreateOverlay();
+        for (var i = 1; i <= 3; i++)
+            ProcessNativeFrame(i, format, width, height, rotation, crop, resize, mirrorX, calibrationUsable);
+        RenderFrame();
+
+        Assert.That(_provider.HasAcceptedCameraFromBoard, Is.False);
+        Assert.That(_overlay.HasAuthoritativeVisualReference, Is.False);
+        AssertVisibility(false);
+    }
+
+    private void ProcessNativeFrame(int sequence, string frameFormat = "NV21_LUMA8",
+        int frameWidth = 1920, int frameHeight = 1080, int rotation = 0, string crop = "NONE", string resize = "NONE",
+        bool mirrorX = false, bool calibrationUsable = true)
+    {
+        const float depth = 2f;
+        var corners = new float[32];
+        var halfSide = DjiFc3582CameraModel.Fx * ReferenceBoardDefinition.AprilTagDetectionSizeMeters / (2f * depth);
+        var markers = ReferenceBoardDefinition.Default.DjiFiducialMarkers;
+        for (var i = 0; i < markers.Count; i++)
+        {
+            var position = markers[i].CenterInBoard;
+            var x = DjiFc3582CameraModel.Cx + DjiFc3582CameraModel.Fx * position.x / depth;
+            var y = DjiFc3582CameraModel.Cy - DjiFc3582CameraModel.Fy * position.y / depth;
+            var offset = i * 8;
+            corners[offset] = x - halfSide; corners[offset + 1] = y - halfSide;
+            corners[offset + 2] = x + halfSide; corners[offset + 3] = y - halfSide;
+            corners[offset + 4] = x + halfSide; corners[offset + 5] = y + halfSide;
+            corners[offset + 6] = x - halfSide; corners[offset + 7] = y + halfSide;
+        }
+        var frame = new DjiBoardVisionProvider.NativeBoardResult
+        {
+            status = 2, calibrationUsable = calibrationUsable, frameSequence = sequence, visionFrameId = sequence,
+            visionFrameTimestampNs = sequence * 100_000_000L, detectorFrameFormat = frameFormat,
+            frameWidth = frameWidth, frameHeight = frameHeight, frameRotationDegrees = rotation,
+            frameCrop = crop, frameResize = resize, frameMirrorX = mirrorX,
+            markerCount = 4, cornerCount = 16, correspondenceCount = 16,
+            markerIds = new[] { 0, 1, 2, 3 }, markerDecisionMargins = new[] { 80f, 80f, 80f, 80f },
+            detectedCornersXY = corners, projectedCornersXY = corners, reprojectionResiduals = new float[16],
+            cameraFromBoardPosition = new[] { 0f, 0f, depth },
+            cameraFromBoardRotationMatrix = new[] { 1f, 0f, 0f, 0f, -1f, 0f, 0f, 0f, -1f }
+        };
+        typeof(DjiBoardVisionProvider).GetMethod("ProcessResult", Private)
+            .Invoke(_provider, new object[] { frame, frame.visionFrameTimestampNs + 1 });
+    }
+
+    private void RenderFrame() => typeof(DjiSharedReferenceCubeOverlay).GetMethod("LateUpdate", Private)
+        .Invoke(_overlay, null);
 
     private void PublishAuthoritativeVisual()
     {
@@ -115,7 +216,7 @@ public sealed class DjiContentAcquisitionVisibilityTests
     private void AssertVisibility(bool enabled)
     {
         var renderers = Field<Renderer[]>("_contentRenderers");
-        Assert.That(renderers.Length, Is.EqualTo(3));
+        Assert.That(renderers.Length, Is.EqualTo(_selection == ARContentType.RoofCanopy ? 3 : 1));
         foreach (var renderer in renderers)
             Assert.That(renderer.enabled, Is.EqualTo(enabled), renderer.name);
     }

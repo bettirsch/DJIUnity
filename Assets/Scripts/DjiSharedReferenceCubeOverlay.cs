@@ -24,7 +24,6 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
     private GameObject _cube;
     private Renderer[] _contentRenderers;
     private RoofCanopyProjectedShadows _projectedShadows;
-    private bool _allowProvisionalPreview;
     private bool _projectionLogged;
     private bool _cubeVisible;
     private bool _hasAppliedContentVisibility;
@@ -32,7 +31,6 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
     private bool _hasRoofCanopyContent;
     private bool _modelVisibleByUser = true;
     private bool _hasAuthoritativeVisualAcquisition;
-    private bool _previewLogged;
     private bool _stalePoseLogged;
     private float _nextPoseDiagnosticTime;
     private DjiRenderPoseSource _lastRenderPoseSource = DjiRenderPoseSource.None;
@@ -71,7 +69,7 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
         ApplyContentVisibility();
     }
 
-    public void Configure(Camera videoCamera, DjiBoardVisionProvider boardVisionProvider, bool allowProvisionalPreview)
+    public void Configure(Camera videoCamera, DjiBoardVisionProvider boardVisionProvider)
     {
         _videoCamera = videoCamera;
         if (_boardVisionProvider != boardVisionProvider)
@@ -84,8 +82,6 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
             if (_boardVisionProvider != null)
                 _boardVisionProvider.AuthoritativeVisualPoseAccepted += OnAuthoritativeVisualPoseAccepted;
         }
-        _allowProvisionalPreview = allowProvisionalPreview;
-
         EnsureOverlayCamera();
         EnsureSharedContent();
         SetCubeVisible(false, "WAITING_FOR_VALID_BOARD_POSE");
@@ -107,12 +103,6 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
     {
         if (_overlayCamera == null || _boardVisionProvider == null)
             return;
-
-        if (!CanPreviewWithCurrentCalibration())
-        {
-            SetCubeVisible(false, "PROVISIONAL_PREVIEW_DISABLED");
-            return;
-        }
 
         if (!_boardVisionProvider.TryGetRenderCameraFromBoard(
                 stalePoseTimeoutSeconds,
@@ -157,21 +147,6 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
         _lastRenderPoseSource = source;
         var age = float.IsFinite(ageSeconds) ? $" ageMs={ageSeconds * 1000f:F0}" : string.Empty;
         Debug.Log($"DJI_RENDER_POSE_SOURCE={source.ToString().ToUpperInvariant()}{age}");
-    }
-
-    private bool CanPreviewWithCurrentCalibration()
-    {
-        var calibration = _boardVisionProvider.Calibration;
-        var enabled = _allowProvisionalPreview &&
-                      calibration != null &&
-                      calibration.AllowProvisionalCalibrationForValidation &&
-                      calibration.Current.provisional;
-        if (enabled && !_previewLogged)
-        {
-            _previewLogged = true;
-            Debug.Log("DJI_SHARED_CUBE_PREVIEW_USING_PROVISIONAL_CALIBRATION worldInitializationAllowed=false");
-        }
-        return enabled;
     }
 
     private void EnsureOverlayCamera()
@@ -243,8 +218,7 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
         // standalone DroneView. This is not an ARCore-world substitute.
         _contentRoot.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
 
-        var calibration = _boardVisionProvider.Calibration.Current;
-        ApplyIntrinsicProjection(calibration);
+        ApplyIntrinsicProjection();
 
         // T_unityView_board = B_unityView_nativeOptical * T_cameraCv_board.
         // B is the single documented native-camera-to-Unity-view basis map.
@@ -264,12 +238,12 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
             Debug.LogError($"DJI_CAMERA_BOARD_ROUND_TRIP_FAILED {roundTrip}");
     }
 
-    private void ApplyIntrinsicProjection(DjiCameraCalibration.Data calibration)
+    private void ApplyIntrinsicProjection()
     {
-        var left = -calibration.cx / calibration.fx * NearClipMeters;
-        var right = (calibration.imageWidth - calibration.cx) / calibration.fx * NearClipMeters;
-        var bottom = -(calibration.imageHeight - calibration.cy) / calibration.fy * NearClipMeters;
-        var top = calibration.cy / calibration.fy * NearClipMeters;
+        var left = -DjiFc3582CameraModel.Cx / DjiFc3582CameraModel.Fx * NearClipMeters;
+        var right = (DjiFc3582CameraModel.ImageWidth - DjiFc3582CameraModel.Cx) / DjiFc3582CameraModel.Fx * NearClipMeters;
+        var bottom = -(DjiFc3582CameraModel.ImageHeight - DjiFc3582CameraModel.Cy) / DjiFc3582CameraModel.Fy * NearClipMeters;
+        var top = DjiFc3582CameraModel.Cy / DjiFc3582CameraModel.Fy * NearClipMeters;
         var projection = Matrix4x4.Frustum(left, right, bottom, top, NearClipMeters, FarClipMeters);
         _overlayCamera.projectionMatrix = projection;
         _overlayCamera.nonJitteredProjectionMatrix = projection;
@@ -279,8 +253,8 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
 
         _projectionLogged = true;
         Debug.Log(
-            $"DJI_OVERLAY_PROJECTION width={calibration.imageWidth} height={calibration.imageHeight} " +
-            $"fx={calibration.fx:F1} fy={calibration.fy:F1} cx={calibration.cx:F1} cy={calibration.cy:F1} " +
+            $"DJI_OVERLAY_PROJECTION width={DjiFc3582CameraModel.ImageWidth} height={DjiFc3582CameraModel.ImageHeight} " +
+            $"fx={DjiFc3582CameraModel.Fx:F1} fy={DjiFc3582CameraModel.Fy:F1} cx={DjiFc3582CameraModel.Cx:F1} cy={DjiFc3582CameraModel.Cy:F1} " +
             "rotation=0 crop=NONE resize=NONE mirror=False");
         Debug.Log("DJI_OVERLAY_CAMERA_BASIS native=(right,down,forward) unityView=(right,up,backward) conversion=Rx180");
     }
@@ -324,10 +298,9 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
         if (nativeCameraPoint.z <= 0f)
             return new Vector2(float.NaN, float.NaN);
 
-        var calibration = _boardVisionProvider.Calibration.Current;
         return new Vector2(
-            calibration.fx * nativeCameraPoint.x / nativeCameraPoint.z + calibration.cx,
-            calibration.fy * nativeCameraPoint.y / nativeCameraPoint.z + calibration.cy);
+            DjiFc3582CameraModel.Fx * nativeCameraPoint.x / nativeCameraPoint.z + DjiFc3582CameraModel.Cx,
+            DjiFc3582CameraModel.Fy * nativeCameraPoint.y / nativeCameraPoint.z + DjiFc3582CameraModel.Cy);
     }
 
     private static string FormatPixel(Vector2 pixel) =>

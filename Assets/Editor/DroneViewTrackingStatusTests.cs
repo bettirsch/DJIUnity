@@ -25,7 +25,7 @@ public sealed class DroneViewTrackingStatusTests
         _providerObject = new GameObject("Status test provider"); _provider = _providerObject.AddComponent<DjiBoardVisionProvider>();
         _videoObject = new GameObject("Status test video", typeof(Camera));
         _overlayObject = new GameObject("Status test overlay"); _overlay = _overlayObject.AddComponent<DjiSharedReferenceCubeOverlay>();
-        _overlay.Configure(_videoObject.GetComponent<Camera>(), _provider, true);
+        _overlay.Configure(_videoObject.GetComponent<Camera>(), _provider);
         _worldObject = new GameObject("Status test world"); _world = _worldObject.AddComponent<DjiWorldLocalizationShadow>();
         _hudObject = new GameObject("Status test HUD"); _hud = _hudObject.AddComponent<DjiTrackingStatusIndicator>();
         _hud.Configure(_overlay, _world);

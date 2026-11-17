@@ -26,11 +26,6 @@ public sealed class AprilTagBorderRetentionExperimentTests
     {
         _object = new GameObject("Border retention provider"); _object.SetActive(false);
         _board = _object.AddComponent<DjiBoardVisionProvider>();
-        var calibration = _object.AddComponent<DjiCameraCalibration>();
-        typeof(DjiCameraCalibration).GetField("measuredData", Private).SetValue(calibration,
-            new DjiCameraCalibration.Data { valid = true, isMeasuredCalibration = true, provisional = false,
-                imageWidth = 1920, imageHeight = 1080, fx = 1000, fy = 1000, cx = 960, cy = 540, calibrationRms = 1 });
-        Set("_calibration", calibration);
         SetSource(DjiRenderPoseSource.Visual); SetQuality(DjiBoardVisionProvider.VisualPoseQuality.HighConfidence);
         Set("_hasLastVisualQualityPose", true);
         Set("<HasHighConfidenceCameraFromBoard>k__BackingField", true);

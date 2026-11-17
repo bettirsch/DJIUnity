@@ -95,14 +95,10 @@ internal static class DJIDroneViewBootstrap
             Debug.Log("DJI_BOOTSTRAP_STATE=BATTERY_INDICATOR_CREATED source=aircraft_battery_snapshot");
         }
 
-        var validationSettings = Resources.Load<DjiBoardVisionValidationSettings>(DjiBoardVisionValidationSettings.ResourceName);
-        var allowProvisionalValidation = validationSettings != null && validationSettings.allowProvisionalCalibrationForValidation;
-        var allowSharedCubePreview = validationSettings != null && validationSettings.allowProvisionalCalibrationForSharedCubePreview;
         var boardVisionProvider = Object.FindFirstObjectByType<DjiBoardVisionProvider>(FindObjectsInactive.Include);
         if (boardVisionProvider == null)
         {
             var boardVisionObject = new GameObject(BoardVisionProviderName);
-            boardVisionObject.AddComponent<DjiCameraCalibration>();
             boardVisionProvider = boardVisionObject.AddComponent<DjiBoardVisionProvider>();
             Debug.Log("DJI_BOOTSTRAP_STATE=REFERENCE_BOARD_VISION_PROVIDER_CREATED");
         }
@@ -110,10 +106,6 @@ internal static class DJIDroneViewBootstrap
         // Reapply the deterministic policy for a scene-authored provider too.
         // This happens before it is wired to world localization or rendering.
         boardVisionProvider.ApplyDroneViewStartupDefaults();
-        boardVisionProvider.SetAllowProvisionalCalibrationForValidation(allowProvisionalValidation);
-        Debug.Log(
-            $"DJI_PROVISIONAL_VALIDATION_INSPECTOR_SETTING asset=Assets/Resources/DjiBoardVisionValidationSettings.asset " +
-            $"enabled={allowProvisionalValidation} worldInitializationAllowed=false");
 
         var worldLocalizationShadow = Object.FindFirstObjectByType<DjiWorldLocalizationShadow>(FindObjectsInactive.Include);
         if (worldLocalizationShadow == null)
@@ -130,10 +122,7 @@ internal static class DJIDroneViewBootstrap
             var overlayObject = new GameObject(SharedCubeOverlayName);
             sharedCubeOverlay = overlayObject.AddComponent<DjiSharedReferenceCubeOverlay>();
         }
-        sharedCubeOverlay.Configure(background.GetComponent<Camera>(), boardVisionProvider, allowSharedCubePreview);
-        Debug.Log(
-            $"DJI_SHARED_CUBE_PREVIEW_INSPECTOR_SETTING asset=Assets/Resources/DjiBoardVisionValidationSettings.asset " +
-            $"enabled={allowSharedCubePreview} worldInitializationAllowed=false");
+        sharedCubeOverlay.Configure(background.GetComponent<Camera>(), boardVisionProvider);
 
         var trackingIndicator = Object.FindFirstObjectByType<DjiTrackingStatusIndicator>(FindObjectsInactive.Include);
         if (trackingIndicator == null)

@@ -49,12 +49,6 @@ public sealed class NoMarkersQualityLossExperimentTests
     {
         _root = new GameObject("No-markers quality-loss test"); _root.SetActive(false);
         _board = _root.AddComponent<DjiBoardVisionProvider>();
-        var calibration = _root.AddComponent<DjiCameraCalibration>();
-        typeof(DjiCameraCalibration).GetField("measuredData", Private).SetValue(calibration,
-            new DjiCameraCalibration.Data { valid = true, isMeasuredCalibration = true, provisional = false,
-                imageWidth = 1920, imageHeight = 1080, fx = 1332.7f, fy = 1332.7f, cx = 960, cy = 540,
-                calibrationRms = 1, detectorFrameFormat = "NV21_LUMA8" });
-        Set("_calibration", calibration);
         _visual = new Pose(new Vector3(.1f, -.2f, 2f), Quaternion.Euler(170, 2, 1));
         _baseline = 1000 * Ms;
         SeedVisual(_visual, _baseline);

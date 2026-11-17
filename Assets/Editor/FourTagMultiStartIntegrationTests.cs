@@ -34,11 +34,6 @@ public sealed class FourTagMultiStartIntegrationTests
         _fixture = JsonUtility.FromJson<Fixture>(File.ReadAllText(Path.Combine(directory, "selected-native-unity-fixture.json")));
         _root = new GameObject("Multi-start downstream integration"); _root.SetActive(false);
         _board = _root.AddComponent<DjiBoardVisionProvider>();
-        var calibration = _root.AddComponent<DjiCameraCalibration>();
-        typeof(DjiCameraCalibration).GetField("measuredData", Private).SetValue(calibration, new DjiCameraCalibration.Data {
-            valid = true, isMeasuredCalibration = true, provisional = false, imageWidth = 1920, imageHeight = 1080,
-            fx = 1332.7f, fy = 1332.7f, cx = 960, cy = 540, calibrationRms = 1, detectorFrameFormat = "NV21_LUMA8" });
-        Set("_calibration", calibration);
         Set("<CurrentRenderPoseSource>k__BackingField", DjiRenderPoseSource.TelemetryPropagated);
         var args = new object[] { _fixture.result, Pose.identity };
         Assert.That((bool)Call("TryGetCameraFromBoard", args), Is.True);

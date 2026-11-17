@@ -29,7 +29,7 @@ public sealed class DjiModelPresentationTests
         _videoObject = new GameObject("Presentation video", typeof(Camera));
         _overlayObject = new GameObject("Presentation overlay");
         _overlay = _overlayObject.AddComponent<DjiSharedReferenceCubeOverlay>();
-        _overlay.Configure(_videoObject.GetComponent<Camera>(), _provider, true);
+        _overlay.Configure(_videoObject.GetComponent<Camera>(), _provider);
         _controlsObject = new GameObject("Presentation controls");
         _controls = _controlsObject.AddComponent<DjiModelPresentationControls>();
         _controls.Configure(_overlay);
@@ -117,10 +117,6 @@ public sealed class DjiModelPresentationTests
     [Test]
     public void LateUpdateWhileHidden_AppliesLatestVisualPose_ShowNeedsNoNewDetection()
     {
-        var calibration = _providerObject.AddComponent<DjiCameraCalibration>();
-        Invoke(calibration, "Awake");
-        calibration.SetAllowProvisionalCalibrationForValidation(true);
-        Set(_provider, "_calibration", calibration);
         Set(_provider, "<HasHighConfidenceCameraFromBoard>k__BackingField", true);
         Set(_provider, "<CurrentVisualPoseQuality>k__BackingField", DjiBoardVisionProvider.VisualPoseQuality.HighConfidence);
         Set(_provider, "_lastHighConfidenceCameraFromBoardRealtime", Time.realtimeSinceStartup);
@@ -178,7 +174,7 @@ public sealed class DjiModelPresentationTests
         _videoObject.GetComponent<Camera>().enabled = false;
         RefreshStatus(); Assert.That(_status.DisplayedStatus, Is.EqualTo(DjiTrackingStatus.Lost));
         _videoObject.GetComponent<Camera>().enabled = true;
-        _overlay.Configure(_videoObject.GetComponent<Camera>(), _provider, true);
+        _overlay.Configure(_videoObject.GetComponent<Camera>(), _provider);
         Applied(DjiRenderPoseSource.TelemetryPropagated);
         Assert.That(_overlay.ModelVisibleByUser, Is.False); AssertVisibility(false);
         Assert.That(Get<GameObject>(_overlay, "_cube"), Is.SameAs(model));

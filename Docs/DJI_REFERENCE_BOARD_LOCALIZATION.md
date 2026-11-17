@@ -1,6 +1,6 @@
 # DJI Reference Board Localization
 
-The physical board frame is shared by phone AR tracking and DJI board vision:
+The physical board defines the frame used by DJI board vision:
 
 - origin: center of the 360 mm x 360 mm printed board;
 - `+X`: right across the print;
@@ -23,21 +23,23 @@ The board frame remains `+X` print-right, `+Y` print-up, `+Z` outward.
 is the generated physical artifact. It must be printed at 100% scale; its
 README contains the required post-print dimensional checks.
 
-The Android bridge receives a second decoded camera output in an
-`ImageReader` YUV_420_888 surface. This CPU path is independent of, and does
-not read from, the Unity OES texture used for video display. The native module
+The Android MSDK `CameraFrameListener` receives NV21 and copies only the
+packed Y plane for the detector (`NV21_LUMA8`). This CPU path is separate
+from the Unity OES texture used for video display. The native module
 uses the official AprilRobotics AprilTag library, detects all configured tags,
 and performs one robust reprojection refinement across all visible marker
 corners. It does not average individual marker rotations.
 
-`DjiCameraCalibration.json` must be generated from raw ImageReader luma frames
-before world-pose initialization is enabled. The committed file intentionally
-uses zero intrinsics and is marked `provisional`; that configuration permits
-marker diagnostics only. The full capture, printable checkerboard, offline
-solve, frame-level errors, and runtime geometry checks are documented in
-`Docs/DjiCameraCalibration/README.md`. CPU frames are currently expected to be
-uncropped, unrotated, and unmirrored 1920x1080. If the delivered frame differs,
-calibrate the exact new geometry instead of changing pose axes heuristically.
+The project uses a single approximate DJI Mini 3 Pro / FC3582 camera model:
+1920 x 1080, `fx=fy=1332.70 px`, `cx=960 px`, `cy=540 px`, zero distortion.
+The same intrinsics are used for native pose estimation and Unity projection.
+The focal estimate comes from the Lensfun 6.7 mm nominal focal length and
+DJI's 1.197 um pixel pitch, scaled from the assumed 8064 px sensor width to
+1920 px. The principal point assumes a centered crop in the DJI video
+pipeline. The detector itself applies no additional crop, resize, rotation,
+or mirror. Unity rejects frames with a different format or pixel geometry.
+These are prototype intrinsics, not physical measurements or a guarantee of
+absolute 3D accuracy.
 
 The transform convention is parent-from-child. Once a quality-gated visual
 measurement provides `T_camera_board`, DJI visual localization computes:
@@ -46,6 +48,9 @@ measurement provides `T_camera_board`, DJI visual localization computes:
 T_world_camera = T_world_board * inverse(T_camera_board)
 ```
 
-No DJI telemetry is fused into this visual pose in this stage. A temporary
-loss of board visibility preserves the last accepted visual pose; propagation
-and relocalization corrections are later work.
+The first authoritative visual pose establishes the persistent world with
+`T_world_board = I`. The selected Cube or RoofCanopy stays fixed in this
+frame. If the visual pose becomes unusable, eligible DJI telemetry can
+propagate the camera pose; a new accepted visual pose restores visual
+authority. The detector and render paths use the same initial acquisition
+and visual quality requirements as before.

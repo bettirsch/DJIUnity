@@ -56,7 +56,7 @@ public sealed class RoofCanopyShadowTests
     [Test] public void ActualOverlayVisibilityTracksInitialAcquisitionHideLossAndReacquisition() {
         var selection=ARContentSelection.Selected;var video=new GameObject("Shadow video",typeof(Camera));var providerObject=new GameObject("Shadow provider");var host=new GameObject("Shadow overlay");DjiSharedReferenceCubeOverlay overlay=null;
         try {
-            ARContentSelection.Set(ARContentType.RoofCanopy);var provider=providerObject.AddComponent<DjiBoardVisionProvider>();overlay=host.AddComponent<DjiSharedReferenceCubeOverlay>();overlay.Configure(video.GetComponent<Camera>(),provider,true);
+            ARContentSelection.Set(ARContentType.RoofCanopy);var provider=providerObject.AddComponent<DjiBoardVisionProvider>();overlay=host.AddComponent<DjiSharedReferenceCubeOverlay>();overlay.Configure(video.GetComponent<Camera>(),provider);
             var type=typeof(DjiSharedReferenceCubeOverlay);var flags=BindingFlags.NonPublic|BindingFlags.Instance;var shadow=(RoofCanopyProjectedShadows)type.GetField("_projectedShadows",flags).GetValue(overlay);var set=type.GetMethod("SetCubeVisible",flags);
             set.Invoke(overlay,new object[]{true,"UNINITIALIZED"});Assert.That(shadow.GroundVisible,Is.False);
             type.GetField("_hasAuthoritativeVisualAcquisition",flags).SetValue(overlay,true);set.Invoke(overlay,new object[]{true,"VISUAL"});Assert.That(shadow.GroundVisible,Is.True);

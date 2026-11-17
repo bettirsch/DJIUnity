@@ -108,13 +108,8 @@ public sealed class RoofCanopyFixedShadowDirectionTests
         {
             ARContentSelection.Set(ARContentType.RoofCanopy);
             var provider = providerObject.AddComponent<DjiBoardVisionProvider>();
-            var calibration = providerObject.AddComponent<DjiCameraCalibration>();
-            typeof(DjiCameraCalibration).GetField("measuredData", Private).SetValue(calibration,
-                new DjiCameraCalibration.Data { valid = true, isMeasuredCalibration = true, provisional = false,
-                    imageWidth = 1920, imageHeight = 1080, fx = 1000, fy = 1000, cx = 960, cy = 540, calibrationRms = 1 });
-            typeof(DjiBoardVisionProvider).GetField("_calibration", Private).SetValue(provider, calibration);
             var overlay = host.AddComponent<DjiSharedReferenceCubeOverlay>();
-            overlay.Configure(video.GetComponent<Camera>(), provider, true);
+            overlay.Configure(video.GetComponent<Camera>(), provider);
             var type = typeof(DjiSharedReferenceCubeOverlay);
             root = (GameObject)type.GetField("_contentRoot", Private).GetValue(overlay);
             camera = ((Camera)type.GetField("_overlayCamera", Private).GetValue(overlay)).gameObject;
