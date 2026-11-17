@@ -4,6 +4,7 @@ using UnityEngine;
 
 public sealed partial class DjiBoardVisionProvider
 {
+    private bool DetailedLogging => _telemetryValidationLogger?.IsDetailedLoggingEnabled == true;
     // Audit state only. No production decision reads these fields.
     private string _orientationDiagnosticQualityReason;
     private int[] _orientationPreviousTagIds;
@@ -57,7 +58,7 @@ public sealed partial class DjiBoardVisionProvider
     {
         try
         {
-            if (_telemetryValidationLogger == null) return;
+            if (!DetailedLogging) return;
             var r = OrientationRecord("VisualOrientationCandidate", result);
             r.arrivalTimeNs = arrival;
             r.poseValid = TryGetCameraFromBoard(result, out var pose) &&
@@ -92,6 +93,7 @@ public sealed partial class DjiBoardVisionProvider
 
     private void TraceOrientationPromotion(NativeBoardResult result, Pose pose, long arrival)
     {
+        if (!DetailedLogging) return;
         _orientationPromoted = true;
         try
         {
@@ -115,7 +117,7 @@ public sealed partial class DjiBoardVisionProvider
 
     private void TraceOrientationReference()
     {
-        if (_lastAuthoritativeVisualPose.timestampNs == _currentHighConfidenceVisualTimestampNs) return;
+        if (!DetailedLogging || _lastAuthoritativeVisualPose.timestampNs == _currentHighConfidenceVisualTimestampNs) return;
         try
         {
             var r = OrientationRecord("VisualTrustedReferenceTrace");
@@ -135,6 +137,7 @@ public sealed partial class DjiBoardVisionProvider
 
     private void TraceOrientationAuthorityTransition(DjiRenderPoseSource previous, DjiRenderPoseSource current)
     {
+        if (!DetailedLogging) return;
         try
         {
             var r = OrientationRecord("VisualRenderAuthorityTrace");
@@ -151,6 +154,7 @@ public sealed partial class DjiBoardVisionProvider
         DjiCameraPoseProvider.TelemetryOrientationSample? after,
         float alpha, Quaternion selected, bool valid, string reason)
     {
+        if (!DetailedLogging) return;
         try
         {
             var key = purpose + ":" + target;

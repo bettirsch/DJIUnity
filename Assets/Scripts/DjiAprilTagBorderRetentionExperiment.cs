@@ -67,7 +67,7 @@ public sealed partial class DjiBoardVisionProvider
 
     private void TraceBorderRetentionVisualApplication(Pose appliedPose)
     {
-        if (CurrentRenderPoseSource != DjiRenderPoseSource.Visual || !HasHighConfidenceCameraFromBoard ||
+        if (!DetailedLogging || CurrentRenderPoseSource != DjiRenderPoseSource.Visual || !HasHighConfidenceCameraFromBoard ||
             _currentHighConfidenceVisualTimestampNs <= 0 ||
             _currentHighConfidenceVisualTimestampNs == _retentionLastAppliedVisualTimestampNs) return;
         try

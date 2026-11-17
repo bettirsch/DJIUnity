@@ -60,18 +60,22 @@ public static class DJIPoseProvider
 #endif
     }
 
-    public static void StopRawTelemetryCallbackLogging()
+    public static bool StopRawTelemetryCallbackLogging()
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
         try
         {
             using var bridge = new AndroidJavaClass(BridgeClassName);
             bridge.CallStatic("stopRawTelemetryCallbackLogging");
+            return true;
         }
         catch (AndroidJavaException e)
         {
             Debug.LogWarning("[DJI] Failed to stop raw telemetry callback logging: " + e.Message);
+            return false;
         }
+#else
+        return true;
 #endif
     }
 }

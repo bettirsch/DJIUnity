@@ -170,6 +170,7 @@ public sealed partial class DjiBoardVisionProvider
 
     private void TraceStaleJumpAppliedPose(Pose pose)
     {
+        if (!DetailedLogging) return;
         try
         {
             var now = DjiBoardVisionBridge.GetMonotonicTimestampNs();

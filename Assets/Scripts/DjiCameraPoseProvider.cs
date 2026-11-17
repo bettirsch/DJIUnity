@@ -81,6 +81,9 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
     [Header("Diagnostics")]
     [SerializeField] private bool diagnosticLogging = true;
     [SerializeField] [Min(0.1f)] private float diagnosticLogIntervalSeconds = 1f;
+    private DjiTelemetryValidationLogger _sessionLogger;
+
+    internal void SetSessionLogger(DjiTelemetryValidationLogger logger) => _sessionLogger = logger;
 
     public bool HasTelemetryPose => HasTelemetryOrientation && HasTelemetryPosition;
     public bool HasTelemetryOrientation { get; private set; }
@@ -389,7 +392,8 @@ public sealed class DjiCameraPoseProvider : MonoBehaviour
         Quaternion aircraftFromGimbalRotation,
         Quaternion navigationFromGimbalRotation)
     {
-        if (!diagnosticLogging || Time.unscaledTime < _nextDiagnosticLogTime)
+        if (!diagnosticLogging || _sessionLogger == null || !_sessionLogger.IsDetailedLoggingEnabled ||
+            Time.unscaledTime < _nextDiagnosticLogTime)
             return;
 
         _nextDiagnosticLogTime = Time.unscaledTime + diagnosticLogIntervalSeconds;

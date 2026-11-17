@@ -436,7 +436,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
 #if DJI_APRILTAG_STALE_JUMP_EXPERIMENT
         if (appliedPose.HasValue) TraceStaleJumpAppliedPose(appliedPose.Value);
 #endif
-        if (appliedPose.HasValue)
+        if (appliedPose.HasValue && DetailedLogging)
             _telemetryValidationLogger?.RecordMotionPoseApplied(
                 DjiBoardVisionBridge.GetMonotonicTimestampNs(), CurrentRenderPoseSource, appliedPose.Value);
         if (CurrentRenderPoseSource != DjiRenderPoseSource.Visual ||
@@ -447,10 +447,11 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
         }
 
         var appliedTimestampNs = DjiBoardVisionBridge.GetMonotonicTimestampNs();
-        DJIGPUBackground.TryGetLatestDisplayedFrameTiming(out var displayedFrameTiming);
         _visualTemporalCompensationPredictor.RecordApplicationTimestamp(
             _authoritativeVisualTimingSample.sourceFrameId,
             appliedTimestampNs);
+        if (!DetailedLogging) return;
+        DJIGPUBackground.TryGetLatestDisplayedFrameTiming(out var displayedFrameTiming);
         _telemetryValidationLogger.WriteVisualLatencySample(
             _authoritativeVisualTimingSample,
             appliedTimestampNs,
@@ -1679,8 +1680,11 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
 
             _lastFrameSequence = result.frameSequence;
             LatestResult = result;
-            Debug.Log($"DJI_BOARD_JSON_FETCH_OK frameSequence={result.frameSequence}");
-            LogDeserializedResult(result);
+            if (DetailedLogging)
+            {
+                Debug.Log($"DJI_BOARD_JSON_FETCH_OK frameSequence={result.frameSequence}");
+                LogDeserializedResult(result);
+            }
             var diagnosticArrival = DjiBoardVisionBridge.GetMonotonicTimestampNs();
             BeginOrientationCandidate(result, diagnosticArrival);
             try { ProcessResult(result, diagnosticArrival); }
@@ -1835,7 +1839,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
         if (result.status < 0)
         {
             Reject($"NATIVE_FRAME_REJECTED status={result.status} reason={result.rejectionReason}");
-            Debug.LogWarning($"DJI_BOARD_FRAME_REJECTED reason={result.rejectionReason} nativeStatus={result.status}");
+            if (DetailedLogging) Debug.LogWarning($"DJI_BOARD_FRAME_REJECTED reason={result.rejectionReason} nativeStatus={result.status}");
             return;
         }
 
@@ -1851,13 +1855,13 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
         if (!TryBuildDiagnosticMarkers(result, out var diagnosticReason))
         {
             // Diagnostic overlays must not discard an otherwise valid board pose.
-            Debug.LogWarning($"BOARD_DIAGNOSTIC_DATA_INVALID frameId={result.visionFrameId} reason={diagnosticReason}");
+            if (DetailedLogging) Debug.LogWarning($"BOARD_DIAGNOSTIC_DATA_INVALID frameId={result.visionFrameId} reason={diagnosticReason}");
         }
 
         if (!ValidateNativeResult(result, out var validationReason))
         {
             Reject($"UNITY_RESULT_VALIDATION_FAILED reason={validationReason}");
-            Debug.LogWarning($"DJI_BOARD_FRAME_REJECTED reason={validationReason}");
+            if (DetailedLogging) Debug.LogWarning($"DJI_BOARD_FRAME_REJECTED reason={validationReason}");
             return;
         }
 
@@ -1881,7 +1885,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
             return;
         }
 
-        Debug.Log(
+        if (DetailedLogging) Debug.Log(
             $"CALIBRATION_FRAME_MATCH runtimeFormat={result.detectorFrameFormat} " +
             $"calibrationFormat={DjiFc3582CameraModel.DetectorFrameFormat} width={result.frameWidth} height={result.frameHeight} " +
             $"rotation={result.frameRotationDegrees} crop={result.frameCrop} resize={result.frameResize} mirror={result.frameMirrorX}");
@@ -1892,7 +1896,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
             return;
         }
 
-        Debug.Log($"DJI_BOARD_RESULT_ACCEPTED frameId={result.visionFrameId} markerCount={result.markerCount} correspondenceCount={result.correspondenceCount} rms={result.reprojectionRms:F3}");
+        if (DetailedLogging) Debug.Log($"DJI_BOARD_RESULT_ACCEPTED frameId={result.visionFrameId} markerCount={result.markerCount} correspondenceCount={result.correspondenceCount} rms={result.reprojectionRms:F3}");
         if (shouldLogDiagnosticSnapshot)
         {
             LogVisionTimestamp(result, DjiBoardVisionBridge.GetMonotonicTimestampNs());
@@ -2423,6 +2427,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
 
     private void RecordVisualPoseTransitionSample(VisualPoseMetrics metrics)
     {
+        if (!DetailedLogging) return;
         if (_visualPoseTransitionHistory.Count == VisualPoseTransitionHistoryCapacity)
             _visualPoseTransitionHistory.Dequeue();
 
@@ -2431,6 +2436,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
 
     private void LogVisualPoseTransitionHistory(string lossReason)
     {
+        if (!DetailedLogging) return;
         Debug.Log($"DJI_VISUAL_POSE_TRANSITION_WINDOW reason={lossReason} samples={_visualPoseTransitionHistory.Count}");
         foreach (var metrics in _visualPoseTransitionHistory)
         {
@@ -2933,7 +2939,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
         InterruptStaleJumpCluster(reason);
         _orientationDiagnosticQualityReason = reason;
         State = LocalizationState.Localizing;
-        Debug.Log($"DJI_LOCALIZATION_SAMPLE_REJECTED reason={reason}");
+        if (DetailedLogging) Debug.Log($"DJI_LOCALIZATION_SAMPLE_REJECTED reason={reason}");
     }
 
     private void RecordVisualTelemetryRotationComparison(
@@ -5991,7 +5997,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
 
     private bool ShouldLogDiagnosticSnapshot()
     {
-        if (!diagnosticLogging || Time.unscaledTime < _nextDiagnosticLogTime)
+        if (!DetailedLogging || !diagnosticLogging || Time.unscaledTime < _nextDiagnosticLogTime)
             return false;
         _nextDiagnosticLogTime = Time.unscaledTime + diagnosticLogIntervalSeconds;
         return true;
@@ -6134,6 +6140,18 @@ internal static class DjiBoardVisionBridge
     private const string BridgeClass = "com.sok9hu.djibridge.DJIUnityVideoBridge";
     private const string VisionClass = "com.sok9hu.djibridge.DjiBoardVisionBridge";
 #endif
+
+    public static void SetDetailedLogging(bool enabled)
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        try
+        {
+            using var bridge = new AndroidJavaClass(VisionClass);
+            bridge.CallStatic("setDetailedLogging", enabled);
+        }
+        catch (Exception e) { Debug.LogWarning($"DJI_VISION_LOG_MODE_UNAVAILABLE type={e.GetType().Name}"); }
+#endif
+    }
 
     public static void Configure(int width, int height, float fx, float fy, float cx, float cy, float[] distortionCoefficients, float[] layout, int intervalMs)
     {

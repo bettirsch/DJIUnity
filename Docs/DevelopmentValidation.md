@@ -19,6 +19,13 @@ directories are not configured. A configured but missing or invalid fixture
 still fails the corresponding test. The altitude and capture suites fall back
 to deterministic inputs if no replay directory is configured.
 
+Exact detector capture is for AprilTag/PnP replay, not camera measurement.
+In a diagnostic Android build with `DJI_EXACT_DETECTOR_CAPTURE` and
+`DjiLoggingMode.Diagnostic`, use the existing one-shot
+`ARM_ONCE <nonce> <count>` token in `dji-calibration/arm.once`. The historical
+directory name is kept for compatibility with existing captures. The saved
+PGM bytes and manifest are the actual detector input and pose evidence.
+
 In DJIBridge, run `gradlew.bat testReleaseUnitTest assembleRelease`.
 The normal build produces `build/outputs/aar/DJIUnityBridge.aar` with the
 multi-start experiment disabled. Use that file as the single Unity Android

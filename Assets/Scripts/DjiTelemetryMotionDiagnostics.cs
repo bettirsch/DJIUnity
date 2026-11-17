@@ -36,7 +36,7 @@ public sealed partial class DjiTelemetryValidationLogger
     private void OnApplicationPause(bool paused)
     {
         if (!paused) return;
-        try { _writer?.Flush(); _outageWriter?.Flush(); _visualLatencyWriter?.Flush(); }
+        try { _normalWriter?.Flush(); _writer?.Flush(); _outageWriter?.Flush(); _visualLatencyWriter?.Flush(); }
         catch (Exception exception) { LogWriteFailure(exception); }
     }
 
@@ -83,6 +83,7 @@ public sealed partial class DjiTelemetryValidationLogger
 
     public void RecordMotionRenderSourceTransition(long timestampNs, DjiRenderPoseSource previous, DjiRenderPoseSource current)
     {
+        RecordNormalRenderTransition(timestampNs, previous, current);
         if (!MotionDiagnosticsReady || previous == current) return;
         try
         {

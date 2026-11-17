@@ -114,9 +114,9 @@ public sealed partial class DjiBoardVisionProvider
             State = LocalizationState.WaitingForReference;
         }
 
-        if (!_hasNoMarkersDiagnostic || decision != _lastNoMarkersDecision ||
+        if (DetailedLogging && (!_hasNoMarkersDiagnostic || decision != _lastNoMarkersDecision ||
             result.listenerGeneration != _lastNoMarkersDiagnosticGeneration ||
-            previousQuality != CurrentVisualPoseQuality || arrivalNs >= _nextNoMarkersDiagnosticNs)
+            previousQuality != CurrentVisualPoseQuality || arrivalNs >= _nextNoMarkersDiagnosticNs))
         {
             _telemetryValidationLogger?.RecordNoMarkersQualityLoss(new NoMarkersQualityLossDiagnostic(
                 arrivalNs, sourceNs, result.listenerGeneration, result.frameSequence, result.status, result.markerCount,

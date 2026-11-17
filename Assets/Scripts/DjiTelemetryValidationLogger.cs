@@ -13,19 +13,27 @@ using UnityEngine;
 [DisallowMultipleComponent]
 public sealed partial class DjiTelemetryValidationLogger : MonoBehaviour
 {
+    // Source-only configuration. A session never changes its file format mid-stream.
+    private const DjiLoggingMode DefaultLoggingMode = DjiLoggingMode.Normal;
     [SerializeField, Min(100)] private int telemetryValidationSnapshotIntervalMs = 500;
     [SerializeField, Min(1)] private int flushEverySamples = 10;
 
     private DjiBoardVisionProvider _boardVisionProvider;
     private DjiCameraPoseProvider _telemetryProvider;
     private DjiWorldLocalizationShadow _worldLocalizationShadow;
-    private StreamWriter _writer;
-    private StreamWriter _outageWriter;
+    private BoundedDiagnosticJsonlWriter _writer;
+    private BoundedDiagnosticJsonlWriter _outageWriter;
+    private BoundedDiagnosticJsonlWriter _normalWriter;
     private TextWriter _visualLatencyWriter;
-    private string _path;
-    private string _outagePath;
-    private string _visualLatencyPath;
+    private string _sessionDirectory;
     private string _telemetrySessionId;
+    private DjiLoggingMode _nextMode = DefaultLoggingMode;
+    private bool _sessionIsDiagnostic;
+    private bool _started;
+    private bool _hadVisual;
+    private bool _hasNormalTelemetryState;
+    private (bool orientation, bool? gps, bool? horizontalTrusted,
+        HorizontalGnssSmoothingState? horizontal, bool? verticalFresh) _normalTelemetryState;
     private long _nextSnapshotTimestampNs;
     private long _nextWorldShadowDiagnosticsTimestampNs;
     private int _sampleIndex;
@@ -40,31 +48,44 @@ public sealed partial class DjiTelemetryValidationLogger : MonoBehaviour
     private bool _writeFailureLogged;
 
     public string TelemetrySessionId => _telemetrySessionId;
+    public bool IsDetailedLoggingEnabled => _visualLatencyWriter != null;
+    public void ConfigureNextSessionLogging(DjiLoggingMode mode) => _nextMode = mode;
 
     public void Configure(DjiBoardVisionProvider boardVisionProvider, DjiCameraPoseProvider telemetryProvider)
     {
         _boardVisionProvider = boardVisionProvider;
         _telemetryProvider = telemetryProvider;
+        if (_telemetryProvider != null) _telemetryProvider.SetSessionLogger(this);
     }
 
-    private void Start() => StartSession();
+    private void Start() { _started = true; StartSession(); }
+
+    private void OnEnable() { if (_started) StartSession(); }
 
     private void Update()
     {
-        if (_writer == null)
+        if (_writer == null && _normalWriter == null)
             return;
 
         var nowTimestampNs = DjiBoardVisionBridge.GetMonotonicTimestampNs();
         if (nowTimestampNs <= 0L)
             return;
 
-        DrainRelativePositionExperiment(nowTimestampNs);
-        WriteNewHorizontalQualitySamples(nowTimestampNs);
+        if (_writer != null)
+        {
+            DrainRelativePositionExperiment(nowTimestampNs);
+            WriteNewHorizontalQualitySamples(nowTimestampNs);
+        }
         if (nowTimestampNs < _nextSnapshotTimestampNs)
             return;
 
         // Skip missed slots rather than burst-writing old snapshots after a stall.
         _nextSnapshotTimestampNs = nowTimestampNs + telemetryValidationSnapshotIntervalMs * 1_000_000L;
+        if (_normalWriter != null)
+        {
+            SampleNormalTelemetry(nowTimestampNs);
+            return;
+        }
         WriteSnapshot(nowTimestampNs);
         WriteWorldShadowDiagnostics(nowTimestampNs, finalSummary: false);
     }
@@ -75,25 +96,35 @@ public sealed partial class DjiTelemetryValidationLogger : MonoBehaviour
 
     private void StartSession()
     {
-        if (_writer != null)
+        StartSessionIn(Application.persistentDataPath);
+    }
+
+    private void StartSessionIn(string directory)
+    {
+        if (_telemetrySessionId != null)
             return;
 
         try
         {
-            var directory = Application.persistentDataPath;
-            Directory.CreateDirectory(directory);
-            _telemetrySessionId = DateTime.UtcNow.ToString("yyyyMMddTHHmmssfffZ", CultureInfo.InvariantCulture);
-            var fileName = $"dji-telemetry-validation-{_telemetrySessionId}.jsonl";
-            _path = Path.Combine(directory, fileName);
-            var stream = new FileStream(_path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096);
-            _writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), 4096);
-            _outagePath = Path.Combine(directory, $"dji-outage-events-{_telemetrySessionId}.jsonl");
-            var outageStream = new FileStream(_outagePath, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096);
-            _outageWriter = new StreamWriter(outageStream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), 4096);
-            _visualLatencyPath = Path.Combine(directory, $"dji-visual-latency-{_telemetrySessionId}.jsonl");
-            var visualLatencyStream = new FileStream(_visualLatencyPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096);
-            _visualLatencyWriter = new BoundedDiagnosticJsonlWriter(
-                new StreamWriter(visualLatencyStream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), 4096));
+            _sessionDirectory = directory;
+            _telemetrySessionId = DjiLogMaintenance.OpenSession();
+            _sessionIsDiagnostic = _nextMode == DjiLoggingMode.Diagnostic;
+            DjiBoardVisionBridge.SetDetailedLogging(_sessionIsDiagnostic);
+            _nextSnapshotTimestampNs = DjiBoardVisionBridge.GetMonotonicTimestampNs();
+            _writeFailureLogged = false;
+            _hasNormalTelemetryState = false;
+            _hadVisual = false;
+            DjiLogMaintenance.Start(_sessionDirectory, _telemetrySessionId, _sessionIsDiagnostic);
+            if (!_sessionIsDiagnostic)
+            {
+                _normalWriter = OpenSessionWriter("dji-session-events");
+                WriteNormalEvent("SessionStarted", _nextSnapshotTimestampNs);
+                Application.logMessageReceived += OnUnityLog;
+                return;
+            }
+            _writer = OpenSessionWriter("dji-telemetry-validation");
+            _outageWriter = OpenSessionWriter("dji-outage-events");
+            _visualLatencyWriter = OpenSessionWriter("dji-visual-latency", includeHealth: true);
             _sampleIndex = 0;
             _outageEventCount = 0;
             _visualLatencySampleCount = 0;
@@ -102,51 +133,48 @@ public sealed partial class DjiTelemetryValidationLogger : MonoBehaviour
             _horizontalQualityCallbackRecordCount = 0;
             _lastVisualLatencySourceFrameId = 0L;
             _lastVisualLatencySourceTimestampNs = 0L;
-            _nextSnapshotTimestampNs = DjiBoardVisionBridge.GetMonotonicTimestampNs();
             _nextWorldShadowDiagnosticsTimestampNs = _nextSnapshotTimestampNs;
             StartMotionDiagnostics();
             DjiDetectorCaptureDiagnostics.Configure(_telemetrySessionId, true);
-            var rawCallbackCaptureStarted = DJIPoseProvider.StartRawTelemetryCallbackLogging(_telemetrySessionId);
             StartRelativePositionExperiment();
-            Debug.Log(
-                "DJI_TELEMETRY_VALIDATION_LOG_STARTED " +
-                $"path={_path} intervalMs={telemetryValidationSnapshotIntervalMs} format=JSONL " +
-                $"outageEventsPath={_outagePath} visualLatencyPath={_visualLatencyPath} " +
-                $"telemetrySessionId={_telemetrySessionId} rawCallbackCaptureStarted={rawCallbackCaptureStarted} " +
-                "clockDomain=ANDROID_MONOTONIC");
+            Debug.Log($"DJI_TELEMETRY_VALIDATION_LOG_STARTED telemetrySessionId={_telemetrySessionId} clockDomain=ANDROID_MONOTONIC");
         }
         catch (Exception exception)
         {
             LogWriteFailure(exception);
+            StopSession();
         }
+    }
+
+    private BoundedDiagnosticJsonlWriter OpenSessionWriter(string prefix, bool includeHealth = false)
+    {
+        var directory = _sessionDirectory;
+        var path = Path.Combine(directory, $"{prefix}-{_telemetrySessionId}.jsonl");
+        return new BoundedDiagnosticJsonlWriter(() =>
+        {
+            Directory.CreateDirectory(directory);
+            return new StreamWriter(new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096),
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), 4096);
+        }, includeHealth: includeHealth);
     }
 
     private void StopSession()
     {
-        DjiDetectorCaptureDiagnostics.Configure(_telemetrySessionId, false);
-        StopMotionDiagnostics();
-        StopRelativePositionExperiment();
-        if (_writer == null)
+        if (_sessionDirectory == null || _telemetrySessionId == null)
             return;
 
+        Application.logMessageReceived -= OnUnityLog;
+        var detailed = _sessionIsDiagnostic;
         try
         {
-            WriteWorldShadowDiagnostics(
-                DjiBoardVisionBridge.GetMonotonicTimestampNs(),
-                finalSummary: true);
-            DJIPoseProvider.StopRawTelemetryCallbackLogging();
-            _writer.Flush();
-            _writer.Dispose();
-            _outageWriter?.Flush();
-            _outageWriter?.Dispose();
-            _visualLatencyWriter?.Flush();
-            _visualLatencyWriter?.Dispose();
-            if (_visualLatencyWriter is BoundedDiagnosticJsonlWriter buffered &&
-                (buffered.Dropped > 0 || buffered.WriteErrors > 0))
-                Debug.LogWarning($"DJI_ORIENTATION_DIAGNOSTIC_INCOMPLETE queueDrops={buffered.Dropped} fileWriteErrors={buffered.WriteErrors}");
-            Debug.Log(
-                $"DJI_TELEMETRY_VALIDATION_LOG_STOPPED samples={_sampleIndex} outageEvents={_outageEventCount} visualLatencySamples={_visualLatencySampleCount} worldRotationPropagationEquivalenceRecords={_worldRotationPropagationEquivalenceRecordCount} worldHorizontalGnssShadowRecords={_worldHorizontalGnssShadowRecordCount} " +
-                $"sessionId={_telemetrySessionId} path={_path} outageEventsPath={_outagePath} visualLatencyPath={_visualLatencyPath}");
+            if (detailed)
+            {
+                DjiDetectorCaptureDiagnostics.Configure(_telemetrySessionId, false);
+                StopMotionDiagnostics();
+                StopRelativePositionExperiment();
+                WriteWorldShadowDiagnostics(DjiBoardVisionBridge.GetMonotonicTimestampNs(), finalSummary: true);
+            }
+            else WriteNormalEvent("SessionStopped", DjiBoardVisionBridge.GetMonotonicTimestampNs());
         }
         catch (Exception exception)
         {
@@ -154,14 +182,75 @@ public sealed partial class DjiTelemetryValidationLogger : MonoBehaviour
         }
         finally
         {
+            DjiLogMaintenance.Finish(_sessionDirectory, _telemetrySessionId, detailed,
+                _normalWriter, _writer, _outageWriter, _visualLatencyWriter as BoundedDiagnosticJsonlWriter);
+            _normalWriter = null;
             _writer = null;
             _outageWriter = null;
             _visualLatencyWriter = null;
-            _path = null;
-            _outagePath = null;
-            _visualLatencyPath = null;
             _telemetrySessionId = null;
+            _sessionDirectory = null;
+            _sessionIsDiagnostic = false;
         }
+    }
+
+    private void SampleNormalTelemetry(long timestampNs)
+    {
+        if (_worldLocalizationShadow == null)
+            _worldLocalizationShadow = FindFirstObjectByType<DjiWorldLocalizationShadow>();
+        var snapshot = _telemetryProvider?.LatestSnapshot;
+        bool propagating = _worldLocalizationShadow != null &&
+            _boardVisionProvider?.CurrentRenderPoseSource == DjiRenderPoseSource.TelemetryPropagated;
+        var state = (
+            orientation: _telemetryProvider != null && _telemetryProvider.HasTelemetryOrientation,
+            gps: TryParseBoolean(snapshot?.positionAudit?.gpsIsValidRaw),
+            horizontalTrusted: _worldLocalizationShadow != null
+                ? (bool?)_worldLocalizationShadow.HorizontalGnssQualityAdmission.trusted : null,
+            horizontal: propagating
+                ? (HorizontalGnssSmoothingState?)_worldLocalizationShadow.ProductionHorizontalGnssState : null,
+            verticalFresh: propagating ? (bool?)_worldLocalizationShadow.ProductionVerticalAltitude.sourceFresh : null);
+        if (_hasNormalTelemetryState && _normalTelemetryState == state) return;
+        _normalTelemetryState = state;
+        _hasNormalTelemetryState = true;
+        _normalWriter.WriteLine(NormalEvent("TelemetryStatusChanged", timestampNs)
+            .Property("orientationAvailable").Boolean(state.orientation)
+            .Property("gpsValid").NullableBoolean(state.gps)
+            .Property("horizontalGnssQualityTrusted").NullableBoolean(state.horizontalTrusted)
+            .Property("horizontalGnssState").NullableString(state.horizontal?.ToString())
+            .Property("altitudeFresh").NullableBoolean(state.verticalFresh).EndObject().ToString());
+    }
+
+    private void OnUnityLog(string message, string stackTrace, LogType type)
+    {
+        if (_normalWriter == null ||
+            (type != LogType.Error && type != LogType.Exception && type != LogType.Assert)) return;
+        _normalWriter.WriteLine(NormalEvent("UnityError", DjiBoardVisionBridge.GetMonotonicTimestampNs())
+            .Property("severity").String(type.ToString())
+            .Property("message").NullableString(ShortText(message))
+            .Property("stackTrace").NullableString(ShortText(stackTrace)).EndObject().ToString());
+    }
+
+    private static string ShortText(string value) =>
+        value == null || value.Length <= 2048 ? value : value.Substring(0, 2048);
+
+    private JsonLine NormalEvent(string type, long timestampNs) => new JsonLine().BeginObject()
+        .Property("recordType").String(type)
+        .Property("telemetrySessionId").String(_telemetrySessionId)
+        .Property("sourceTimestampNs").Number(timestampNs);
+
+    private void WriteNormalEvent(string type, long timestampNs) =>
+        _normalWriter?.WriteLine(NormalEvent(type, timestampNs).EndObject().ToString());
+
+    private void RecordNormalRenderTransition(long timestampNs, DjiRenderPoseSource previous, DjiRenderPoseSource current)
+    {
+        if (_normalWriter == null || previous == current) return;
+        var type = previous == DjiRenderPoseSource.Visual ? "VisualTrackingLost" :
+            current == DjiRenderPoseSource.Visual ? (_hadVisual ? "VisualReacquired" : "VisualAcquired") :
+            "RenderSourceTransition";
+        if (current == DjiRenderPoseSource.Visual) _hadVisual = true;
+        _normalWriter.WriteLine(NormalEvent(type, timestampNs)
+            .Property("previousRenderSource").String(previous.ToString())
+            .Property("currentRenderSource").String(current.ToString()).EndObject().ToString());
     }
 
     /// <summary>

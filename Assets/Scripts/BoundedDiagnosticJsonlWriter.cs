@@ -5,11 +5,12 @@ using System.IO;
 using System.Text;
 using System.Threading;
 
-/// <summary>One owner for the existing visual-latency stream. Tracking only enqueues
+/// <summary>One owner per JSONL stream. Tracking only enqueues
 /// bounded strings; disk writes/periodic flushes run on the worker, never under the queue lock.</summary>
 public sealed class BoundedDiagnosticJsonlWriter : TextWriter
 {
-    private readonly TextWriter sink;
+    private readonly Func<TextWriter> openSink;
+    private readonly bool includeHealth;
     private readonly Queue<string> pending = new();
     private readonly object gate = new();
     private readonly AutoResetEvent wake = new(false);
@@ -24,10 +25,17 @@ public sealed class BoundedDiagnosticJsonlWriter : TextWriter
     public void ReportCaptureError() => Interlocked.Increment(ref captureErrors);
 
     public BoundedDiagnosticJsonlWriter(TextWriter sink, int capacity = 256)
+        : this(sink == null ? throw new ArgumentNullException(nameof(sink)) : () => sink,
+            capacity, includeHealth: true)
     {
-        this.sink = sink ?? throw new ArgumentNullException(nameof(sink));
+    }
+
+    public BoundedDiagnosticJsonlWriter(Func<TextWriter> openSink, int capacity = 256, bool includeHealth = true)
+    {
+        this.openSink = openSink ?? throw new ArgumentNullException(nameof(openSink));
+        this.includeHealth = includeHealth;
         this.capacity = Math.Max(1, capacity);
-        worker = new Thread(Drain) { IsBackground = true, Name = "DJI visual JSONL" };
+        worker = new Thread(Drain) { IsBackground = true, Name = "DJI JSONL writer" };
         worker.Start();
     }
 
@@ -37,8 +45,8 @@ public sealed class BoundedDiagnosticJsonlWriter : TextWriter
         {
             if (closing || pending.Count >= capacity) { Interlocked.Increment(ref dropped); return; }
             pending.Enqueue(value);
+            wake.Set();
         }
-        wake.Set();
     }
 
     public void ObserveSerialization(long ticks)
@@ -47,9 +55,47 @@ public sealed class BoundedDiagnosticJsonlWriter : TextWriter
         Interlocked.Increment(ref serializationCount);
     }
 
-    public override void Flush() { lock (gate) flushRequested = true; wake.Set(); }
+    public override void Flush()
+    {
+        lock (gate)
+        {
+            if (closing) return;
+            flushRequested = true;
+            wake.Set();
+        }
+    }
+
+    public void RequestClose()
+    {
+        lock (gate)
+        {
+            if (closing) return;
+            closing = true;
+            wake.Set();
+        }
+    }
 
     private void Drain()
+    {
+        try
+        {
+            using var sink = openSink();
+            WritePending(sink);
+        }
+        catch (Exception) { Interlocked.Increment(ref errors); }
+        finally
+        {
+            lock (gate)
+            {
+                closing = true;
+                Interlocked.Add(ref dropped, pending.Count);
+                pending.Clear();
+                wake.Dispose();
+            }
+        }
+    }
+
+    private void WritePending(TextWriter sink)
     {
         var lastFlush = DateTime.UtcNow;
         var lastSummary = lastFlush;
@@ -66,8 +112,12 @@ public sealed class BoundedDiagnosticJsonlWriter : TextWriter
             }
             try
             {
-                if (line != null) { sink.WriteLine(line); written++; bytes += Encoding.UTF8.GetByteCount(line) + 1; }
-                if (done || (DateTime.UtcNow - lastSummary).TotalSeconds >= 5)
+                if (line != null)
+                {
+                    sink.WriteLine(line);
+                    if (includeHealth) { written++; bytes += Encoding.UTF8.GetByteCount(line) + 1; }
+                }
+                if (includeHealth && (done || (DateTime.UtcNow - lastSummary).TotalSeconds >= 5))
                 {
                     sink.WriteLine(Summary(done));
                     lastSummary = DateTime.UtcNow;
@@ -79,7 +129,6 @@ public sealed class BoundedDiagnosticJsonlWriter : TextWriter
             if (done) break;
             if (line == null) wake.WaitOne(100);
         }
-        try { sink.Dispose(); } catch (Exception) { Interlocked.Increment(ref errors); }
     }
 
     private string Summary(bool final) =>
@@ -95,10 +144,8 @@ public sealed class BoundedDiagnosticJsonlWriter : TextWriter
     protected override void Dispose(bool disposing)
     {
         if (!disposing) return;
-        lock (gate) { if (closing) return; closing = true; }
-        wake.Set();
-        worker.Join(); // Only session finalization waits for outstanding I/O.
-        wake.Dispose();
+        RequestClose();
+        worker.Join(); // Runtime callers join only on the lifecycle worker.
         base.Dispose(disposing);
     }
 }

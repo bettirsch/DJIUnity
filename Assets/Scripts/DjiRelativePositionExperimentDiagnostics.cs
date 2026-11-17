@@ -17,7 +17,7 @@ public sealed partial class DjiTelemetryValidationLogger
             using var bridge = new AndroidJavaClass("com.sok9hu.djibridge.DJIPoseBridge");
             _relativePositionExperimentStarted = bridge.CallStatic<bool>("startRelativePositionExperiment", _telemetrySessionId);
             _nextRelativePositionDrainNs = 0;
-            Debug.Log($"DJI_RELATIVE_POSITION_EXPERIMENT_STARTED enabled={_relativePositionExperimentStarted} sessionId={_telemetrySessionId} path={_visualLatencyPath} localizationInput=false");
+            Debug.Log($"DJI_RELATIVE_POSITION_EXPERIMENT_STARTED enabled={_relativePositionExperimentStarted} sessionId={_telemetrySessionId} localizationInput=false");
         }
         catch (Exception e) { Debug.LogWarning("DJI_RELATIVE_POSITION_EXPERIMENT_START_FAILED " + e); }
 #endif
