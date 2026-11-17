@@ -3,7 +3,6 @@ using System.IO;
 using System.Reflection;
 using NUnit.Framework;
 using UnityEngine;
-using UnityEngine.UI;
 using Object = UnityEngine.Object;
 
 public sealed class HorizontalAdmissionTraceTests
@@ -119,34 +118,7 @@ public sealed class HorizontalAdmissionTraceTests
     }
 
     [Test]
-    public void ManualMarkers_FlushAndRemainReadableAfterWriterClose()
-    {
-        var path = Path.Combine(Path.GetTempPath(), "dji-marker-" + Guid.NewGuid() + ".jsonl");
-        var go = new GameObject("Marker Logger Test");
-        try
-        {
-            var logger = go.AddComponent<DjiTelemetryValidationLogger>();
-            using (var writer = new StreamWriter(new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read)))
-            {
-                Set(logger, "_visualLatencyWriter", writer);
-                Set(logger, "_telemetrySessionId", "test");
-                logger.RecordUserMotionMarker("MOVE_START");
-                using (var reader = new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)))
-                    Assert.That(reader.ReadToEnd(), Does.Contain("UserMotionMarker"));
-                logger.RecordUserMotionMarker("STOP");
-                Set(logger, "_visualLatencyWriter", null);
-            }
-            var lines = File.ReadAllLines(path);
-            Assert.That(lines.Length, Is.EqualTo(2));
-            Assert.That(lines[0], Does.Contain("MOVE_START"));
-            Assert.That(lines[1], Does.Contain("STOP"));
-            Assert.That(lines[0], Does.Contain("MANUAL_CUE_NOT_MEASURED_PHYSICAL_ONSET"));
-        }
-        finally { Object.DestroyImmediate(go); if (File.Exists(path)) File.Delete(path); }
-    }
-
-    [Test]
-    public void DisabledLogger_WritesNeitherMarkersNorTransitions()
+    public void DisabledMotionDiagnostics_WritesNoDetailedTransitions()
     {
         var go = new GameObject("Disabled Motion Logger Test");
         try
@@ -156,33 +128,10 @@ public sealed class HorizontalAdmissionTraceTests
             using var writer = new StreamWriter(memory);
             Set(logger, "_visualLatencyWriter", writer);
             Set(logger, "enableMotionDiagnostics", false);
-            logger.RecordUserMotionMarker("MOVE_START");
             logger.RecordMotionRenderSourceTransition(100L, DjiRenderPoseSource.Visual, DjiRenderPoseSource.TelemetryPropagated);
             writer.Flush();
             Assert.That(memory.Length, Is.Zero);
             Set(logger, "_visualLatencyWriter", null);
-        }
-        finally { Object.DestroyImmediate(go); }
-    }
-
-    [Test]
-    public void ManualHud_ContainsOnlyTwoLogMarkerButtons()
-    {
-        var go = new GameObject("Motion Hud Test");
-        try
-        {
-            var logger = go.AddComponent<DjiTelemetryValidationLogger>();
-            var type = typeof(DjiTelemetryValidationLogger).Assembly.GetType("DjiMotionMarkerHud");
-            var hud = go.AddComponent(type);
-            type.GetMethod("Configure").Invoke(hud, new object[] { logger });
-            var buttons = go.GetComponentsInChildren<Button>();
-            Assert.That(buttons.Length, Is.EqualTo(2));
-            Assert.That(buttons[0].name, Is.EqualTo("MARK MOVE START"));
-            Assert.That(buttons[1].name, Is.EqualTo("MARK STOP"));
-            buttons[0].onClick.Invoke();
-            buttons[1].onClick.Invoke();
-            Assert.That(go.GetComponentsInChildren<Camera>(), Is.Empty);
-            Assert.That(go.GetComponentsInChildren<DjiWorldLocalizationShadow>(), Is.Empty);
         }
         finally { Object.DestroyImmediate(go); }
     }

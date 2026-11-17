@@ -114,18 +114,6 @@ public sealed partial class DjiTelemetryValidationLogger
         catch (Exception exception) { LogWriteFailure(exception); }
     }
 
-    public void RecordUserMotionMarker(string marker)
-    {
-        if (!MotionDiagnosticsReady || (marker != "MOVE_START" && marker != "STOP")) return;
-        try
-        {
-            var now = DjiBoardVisionBridge.GetMonotonicTimestampNs();
-            WriteMotionJson(BuildMotionEventJson("UserMotionMarker", _telemetrySessionId, now, marker,
-                "MANUAL_CUE_NOT_MEASURED_PHYSICAL_ONSET"), now, true);
-        }
-        catch (Exception exception) { LogWriteFailure(exception); }
-    }
-
     private static bool IsMotionPropagation(DjiRenderPoseSource source) =>
         source == DjiRenderPoseSource.TelemetryPropagated;
 

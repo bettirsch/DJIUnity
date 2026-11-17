@@ -188,7 +188,7 @@ public sealed class DroneViewTrackingStatusTests
     }
 
     [Test]
-    public void LoggerStartup_NoLongerCreatesVisibleDeveloperButtons_LoggingApiRemains()
+    public void LoggerStartup_DoesNotCreateDeveloperButtonsOrExposeManualMarkers()
     {
         var go = new GameObject("Marker startup test");
         try
@@ -196,8 +196,8 @@ public sealed class DroneViewTrackingStatusTests
             var logger = go.AddComponent<DjiTelemetryValidationLogger>();
             Invoke(logger, "StartMotionDiagnostics");
             Assert.That(go.GetComponentsInChildren<Button>(true), Is.Empty);
-            Assert.That(go.GetComponent(typeof(DjiTelemetryValidationLogger).Assembly.GetType("DjiMotionMarkerHud")), Is.Null);
-            Assert.That(typeof(DjiTelemetryValidationLogger).GetMethod("RecordUserMotionMarker"), Is.Not.Null);
+            Assert.That(typeof(DjiTelemetryValidationLogger).Assembly.GetType("DjiMotionMarkerHud"), Is.Null);
+            Assert.That(typeof(DjiTelemetryValidationLogger).GetMethod("RecordUserMotionMarker"), Is.Null);
             Invoke(logger, "StopMotionDiagnostics");
         }
         finally { Object.DestroyImmediate(go); }
