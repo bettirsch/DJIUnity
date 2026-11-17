@@ -308,7 +308,7 @@ public sealed class AprilTagBorderRetentionExperimentTests
             !PlayerSettings.GetGraphicsAPIs(BuildTarget.Android).SequenceEqual(new[] { GraphicsDeviceType.OpenGLES3 }))
             throw new InvalidOperationException("Expected unchanged Android production configuration.");
         var defines = new[] { "DJI_APRILTAG_BORDER_48_EXPERIMENT", "DJI_APRILTAG_STALE_JUMP_EXPERIMENT",
-            "DJI_APRILTAG_BORDER_RETENTION_EXPERIMENT", "DJI_VERTICAL_RAW_EXPERIMENT" };
+            "DJI_APRILTAG_BORDER_RETENTION_EXPERIMENT" };
         var persistent = PlayerSettings.GetScriptingDefineSymbols(NamedBuildTarget.Android);
         if (defines.Any(persistent.Contains)) throw new InvalidOperationException("Experiments must remain build-only.");
         Directory.CreateDirectory(Path.GetDirectoryName(output));

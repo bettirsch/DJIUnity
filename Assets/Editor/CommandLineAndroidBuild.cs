@@ -16,9 +16,17 @@ public static class CommandLineAndroidBuild
         BuildAndroidPlayer(BuildOptions.AutoRunPlayer);
     }
 
-    private static void BuildAndroidPlayer(BuildOptions options)
+    public static void BuildDetectorCaptureDiagnosticApk()
     {
-        var outputPath = GetArgument("-outputPath") ?? "build/DJIUnity.apk";
+        BuildAndroidPlayer(BuildOptions.None, detectorCaptureDiagnostic: true);
+    }
+
+    private static void BuildAndroidPlayer(BuildOptions options, bool detectorCaptureDiagnostic = false)
+    {
+        var outputPath = GetArgument("-outputPath");
+        if (detectorCaptureDiagnostic && string.IsNullOrWhiteSpace(outputPath))
+            throw new ArgumentException("Missing -outputPath for the detector capture APK.");
+        outputPath ??= "build/DJIUnity.apk";
         var outputDirectory = Path.GetDirectoryName(outputPath);
         if (!string.IsNullOrEmpty(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
@@ -26,20 +34,8 @@ public static class CommandLineAndroidBuild
         EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
         EditorUserBuildSettings.buildAppBundle = false;
 
-        var scenes = EditorBuildSettings.scenes
-            .Where(scene => scene.enabled)
-            .Select(scene => scene.path)
-            .ToArray();
-
-        var buildOptions = new BuildPlayerOptions
-        {
-            scenes = scenes,
-            locationPathName = outputPath,
-            target = BuildTarget.Android,
-            options = options
-        };
-
-        var report = BuildPipeline.BuildPlayer(buildOptions);
+        var report = BuildPipeline.BuildPlayer(
+            CreateAndroidBuildOptions(outputPath, options, detectorCaptureDiagnostic));
         if (report.summary.result != BuildResult.Succeeded)
         {
             throw new Exception(
@@ -49,6 +45,18 @@ public static class CommandLineAndroidBuild
 
         UnityEngine.Debug.Log($"Android APK built: {Path.GetFullPath(outputPath)}");
     }
+
+    internal static BuildPlayerOptions CreateAndroidBuildOptions(
+        string outputPath, BuildOptions options, bool detectorCaptureDiagnostic = false) => new()
+    {
+        scenes = EditorBuildSettings.scenes.Where(scene => scene.enabled).Select(scene => scene.path).ToArray(),
+        locationPathName = outputPath,
+        target = BuildTarget.Android,
+        options = options,
+        extraScriptingDefines = detectorCaptureDiagnostic
+            ? new[] { "DJI_EXACT_DETECTOR_CAPTURE" }
+            : Array.Empty<string>()
+    };
 
     private static string GetArgument(string name)
     {

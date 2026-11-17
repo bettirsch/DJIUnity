@@ -69,8 +69,7 @@ public sealed class RelativePositionExperimentTests
         {
             scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray(),
             locationPathName = output, target = BuildTarget.Android, options = BuildOptions.None,
-            // Preserve the last validated physical APK's RawTarget profile.
-            extraScriptingDefines = new[] { "DJI_VERTICAL_RAW_EXPERIMENT", "DJI_RELATIVE_POSITION_EXPERIMENT" }
+            extraScriptingDefines = new[] { "DJI_RELATIVE_POSITION_EXPERIMENT" }
         });
         if (report.summary.result != BuildResult.Succeeded) throw new Exception("Relative-position diagnostic build failed: " + report.summary.result);
         Debug.Log("RELATIVE_POSITION_DIAGNOSTIC_APK_BUILD_SUCCESS path=" + output);

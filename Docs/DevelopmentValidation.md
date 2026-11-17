@@ -19,9 +19,13 @@ directories are not configured. A configured but missing or invalid fixture
 still fails the corresponding test. The altitude and capture suites fall back
 to deterministic inputs if no replay directory is configured.
 
+The normal `CommandLineAndroidBuild.BuildApk` build follows accepted
+altitude targets directly (RawTarget), without any experimental define.
+
 Exact detector capture is for AprilTag/PnP replay, not camera measurement.
-In a diagnostic Android build with `DJI_EXACT_DETECTOR_CAPTURE` and
-`DjiLoggingMode.Diagnostic`, use the existing one-shot
+To opt in separately, use `CommandLineAndroidBuild.BuildDetectorCaptureDiagnosticApk`
+with an explicit `-outputPath`. It adds only `DJI_EXACT_DETECTOR_CAPTURE`.
+With `DjiLoggingMode.Diagnostic`, use the existing one-shot
 `ARM_ONCE <nonce> <count>` token in `dji-calibration/arm.once`. The historical
 directory name is kept for compatibility with existing captures. The saved
 PGM bytes and manifest are the actual detector input and pose evidence.

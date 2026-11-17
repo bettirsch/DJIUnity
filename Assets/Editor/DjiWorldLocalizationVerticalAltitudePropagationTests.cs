@@ -24,7 +24,9 @@ public sealed class DjiWorldLocalizationVerticalAltitudePropagationTests
         Assert.That(vertical.sourceFresh, Is.True);
         Assert.That(vertical.rawDeltaAltitudeUp, Is.EqualTo(1f));
         Assert.That(vertical.rawDeltaNavigationDown, Is.EqualTo(-1f));
-        Assert.That(vertical.smoothedDeltaNavigationDown, Is.LessThan(0f));
+        Assert.That(vertical.smoothedDeltaNavigationDown, Is.EqualTo(-1f));
+        Assert.That(vertical.estimate.alpha, Is.EqualTo(1f));
+        Assert.That(vertical.estimate.tauSeconds, Is.Zero);
         AssertPose(coordinator.Snapshot.worldFromBoard, board);
     }
 

@@ -7,9 +7,7 @@ using System.Reflection;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.Build;
-using UnityEditor.Build.Reporting;
 using UnityEngine;
-using UnityEngine.Rendering;
 
 public sealed class VerticalRawAltitudeExperimentTests
 {
@@ -17,21 +15,45 @@ public sealed class VerticalRawAltitudeExperimentTests
     private static VerticalAltitudeSmoothingEstimator Create(float tau) => new(tau);
 
     [Test]
-    public void NormalDefaultAndExplicitPointThree_PreserveExactRollback()
+    public void ProductionDefault_MatchesPreviouslyOptedInRawTarget()
     {
         var normal = new VerticalAltitudeSmoothingEstimator();
-        var explicitBaseline = Create(.3f);
-        Assert.That(VerticalAltitudeSmoothingEstimator.DefaultMode, Is.EqualTo(VerticalAltitudeSmoothingMode.Exponential));
-        Assert.That(VerticalAltitudeSmoothingEstimator.DefaultTauSeconds, Is.EqualTo(.3f));
-        normal.Initialize(Second); explicitBaseline.Initialize(Second);
+        var historicalRaw = new VerticalAltitudeSmoothingEstimator(VerticalAltitudeSmoothingMode.RawTarget, .3f);
+        Assert.That(normal.Mode, Is.EqualTo(VerticalAltitudeSmoothingMode.RawTarget));
+        normal.Initialize(Second); historicalRaw.Initialize(Second);
         for (int i = 1; i <= 100; i++)
         {
             long t = Second + i * 17_000_000L;
-            var a = normal.Update(t, true, i * .01f, t);
-            var b = explicitBaseline.Update(t, true, i * .01f, t);
+            bool fresh = i % 4 != 0;
+            long source = fresh ? t : 0L;
+            var a = normal.Update(t, fresh, i * .01f, source);
+            var b = historicalRaw.Update(t, fresh, i * .01f, source);
+            Assert.That(a.state, Is.EqualTo(b.state));
+            Assert.That(a.altitudeSourceTimestampNs, Is.EqualTo(b.altitudeSourceTimestampNs));
+            Assert.That(a.sourceAccepted, Is.EqualTo(b.sourceAccepted));
             Assert.That(a.smoothedNavigationDown, Is.EqualTo(b.smoothedNavigationDown));
-            Assert.That(a.alpha, Is.EqualTo(b.alpha));
+            Assert.That(a.alpha, Is.EqualTo(fresh ? 1f : 0f));
+            Assert.That(a.tauSeconds, Is.Zero);
         }
+    }
+
+    [Test]
+    public void NormalAndroidBuild_UsesRawTargetWithoutExperimentDefines()
+    {
+        var options = CommandLineAndroidBuild.CreateAndroidBuildOptions("unused.apk", BuildOptions.None);
+        Assert.That(options.target, Is.EqualTo(BuildTarget.Android));
+        Assert.That(options.extraScriptingDefines, Is.Empty);
+        var projectDefines = PlayerSettings.GetScriptingDefineSymbols(NamedBuildTarget.Android).Split(';');
+        Assert.That(projectDefines.Where(d => d.StartsWith("DJI_", StringComparison.Ordinal)), Is.Empty);
+        Assert.That(new VerticalAltitudeSmoothingEstimator().Mode, Is.EqualTo(VerticalAltitudeSmoothingMode.RawTarget));
+    }
+
+    [Test]
+    public void DetectorCaptureBuild_OptsInOnlyToCapture()
+    {
+        var options = CommandLineAndroidBuild.CreateAndroidBuildOptions(
+            "unused.apk", BuildOptions.None, detectorCaptureDiagnostic: true);
+        Assert.That(options.extraScriptingDefines, Is.EqualTo(new[] { "DJI_EXACT_DETECTOR_CAPTURE" }));
     }
 
     [Test]
@@ -132,7 +154,7 @@ public sealed class VerticalRawAltitudeExperimentTests
         bool fresh = DjiAircraftPositionFreshness.IsFreshAtOrBefore(Second, Second + ageMs * 1_000_000L,
             VerticalAltitudeSmoothingEstimator.DefaultMaximumAgeMilliseconds, out _);
         Assert.That(fresh, Is.EqualTo(expected));
-        var e = Create(0); e.Initialize(Second);
+        var e = new VerticalAltitudeSmoothingEstimator(); e.Initialize(Second);
         var r = e.Update(Second + ageMs * 1_000_000L, fresh, -1, fresh ? Second : 0);
         Assert.That(r.smoothedNavigationDown, Is.EqualTo(expected ? -1 : 0));
     }
@@ -196,7 +218,7 @@ public sealed class VerticalRawAltitudeExperimentTests
     [Test]
     public void RawVersusBaseline_LeavesNavigationHorizontalAndOrientationIdentical()
     {
-        var baseline = Coordinator(.3f); var raw = Coordinator(0);
+        var baseline = Coordinator(.3f); var raw = new DjiWorldLocalizationShadowCoordinator();
         var positions = new List<TelemetryAircraftPositionSample> { new(Second, 47, 19, 100) };
         var visual = new Pose(new Vector3(.2f, -.1f, 2), Quaternion.Euler(4, 12, 3));
         var nav = Quaternion.Euler(20, 30, 5);
@@ -225,7 +247,7 @@ public sealed class VerticalRawAltitudeExperimentTests
         var directory = Environment.GetEnvironmentVariable("DJI_VERTICAL_RAW_REPLAY_DIR");
         if (string.IsNullOrEmpty(directory))
         {
-            var portable = Create(tau); portable.Initialize(Second); double expected = 0;
+            var portable = ReplayEstimator(tau); portable.Initialize(Second); double expected = 0;
             for (int i = 1; i <= 1500; i++)
             {
                 long t = Second + i * 20_000_000L; float target = (float)Math.Sin(i * .01);
@@ -239,7 +261,7 @@ public sealed class VerticalRawAltitudeExperimentTests
         foreach (string line in File.ReadLines(Path.Combine(directory, "vertical-raw-replay-fixture.csv")).Skip(1))
         {
             var f = line.Split(','); if (Math.Abs(float.Parse(f[6], CultureInfo.InvariantCulture) - tau) > .00001f) continue;
-            string next = f[0] + "/" + f[1]; if (key != next) { key = next; estimator = Create(tau); estimator.Initialize(long.Parse(f[1])); }
+            string next = f[0] + "/" + f[1]; if (key != next) { key = next; estimator = ReplayEstimator(tau); estimator.Initialize(long.Parse(f[1])); }
             long evaluation = long.Parse(f[2]), source = long.Parse(f[3]); Assert.That(source, Is.LessThanOrEqualTo(evaluation));
             var result = estimator.Update(evaluation, f[4] == "1", float.Parse(f[5], CultureInfo.InvariantCulture), source);
             Assert.That(result.smoothedNavigationDown, Is.EqualTo(double.Parse(f[7], CultureInfo.InvariantCulture)).Within(2e-5));
@@ -249,6 +271,9 @@ public sealed class VerticalRawAltitudeExperimentTests
         TestContext.WriteLine("Causal replay rows checked=" + count);
     }
 
+    private static VerticalAltitudeSmoothingEstimator ReplayEstimator(float tau) =>
+        tau == 0f ? new VerticalAltitudeSmoothingEstimator() : Create(tau);
+
     private static DjiWorldLocalizationShadowCoordinator Coordinator(float tau)
     {
         var c = new DjiWorldLocalizationShadowCoordinator();
@@ -257,29 +282,4 @@ public sealed class VerticalRawAltitudeExperimentTests
         return c;
     }
 
-    // Build-only opt-in: no project setting, runtime UI or normal startup default changes.
-    public static void BuildRawDiagnosticApk()
-    {
-        string[] args = Environment.GetCommandLineArgs();
-        int index = Array.IndexOf(args, "-outputPath");
-        if (index < 0 || index + 1 >= args.Length) throw new ArgumentException("Missing -outputPath");
-        string output = args[index + 1];
-        if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.Android || EditorUserBuildSettings.buildAppBundle ||
-            PlayerSettings.GetScriptingBackend(NamedBuildTarget.Android) != ScriptingImplementation.IL2CPP ||
-            PlayerSettings.Android.targetArchitectures != AndroidArchitecture.ARM64 ||
-            (int)PlayerSettings.Android.minSdkVersion != 24 || (int)PlayerSettings.Android.targetSdkVersion != 36 ||
-            !PlayerSettings.GetGraphicsAPIs(BuildTarget.Android).SequenceEqual(new[] { GraphicsDeviceType.OpenGLES3 }))
-            throw new InvalidOperationException("Expected existing Android production configuration.");
-        Directory.CreateDirectory(Path.GetDirectoryName(output));
-        var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
-        {
-            scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray(),
-            locationPathName = output, target = BuildTarget.Android, options = BuildOptions.None,
-            extraScriptingDefines = Array.IndexOf(args, "-detectorCaptureDiagnostic") >= 0
-                ? new[] { "DJI_VERTICAL_RAW_EXPERIMENT", "DJI_EXACT_DETECTOR_CAPTURE" }
-                : new[] { "DJI_VERTICAL_RAW_EXPERIMENT" }
-        });
-        if (report.summary.result != BuildResult.Succeeded) throw new Exception("Raw vertical diagnostic build failed: " + report.summary.result);
-        Debug.Log("VERTICAL_RAW_DIAGNOSTIC_APK_BUILD_SUCCESS mode=RawTarget extraScriptingDefine=DJI_VERTICAL_RAW_EXPERIMENT rollbackDefaultTau=0.3 path=" + Path.GetFullPath(output));
-    }
 }

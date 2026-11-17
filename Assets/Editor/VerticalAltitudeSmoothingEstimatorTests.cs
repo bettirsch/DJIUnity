@@ -5,14 +5,17 @@ public sealed class VerticalAltitudeSmoothingEstimatorTests
     private const long Millisecond = 1_000_000L;
 
     [Test]
-    public void Defaults_UseTheProvisionalValidatedTau()
+    public void Defaults_UseRawTargetAndPreserveFreshnessLimit()
     {
         var estimator = new VerticalAltitudeSmoothingEstimator();
         Assert.That(estimator.Initialize(100L * Millisecond), Is.True);
 
-        var result = estimator.Update(500L * Millisecond, true, 0f, 500L * Millisecond);
+        var result = estimator.Update(500L * Millisecond, true, -1f, 500L * Millisecond);
 
-        Assert.That(result.tauSeconds, Is.EqualTo(0.3f));
+        Assert.That(estimator.Mode, Is.EqualTo(VerticalAltitudeSmoothingMode.RawTarget));
+        Assert.That(result.tauSeconds, Is.Zero);
+        Assert.That(result.alpha, Is.EqualTo(1f));
+        Assert.That(result.smoothedNavigationDown, Is.EqualTo(-1f));
         Assert.That(VerticalAltitudeSmoothingEstimator.DefaultMaximumAgeMilliseconds, Is.EqualTo(300f));
     }
 
@@ -66,7 +69,7 @@ public sealed class VerticalAltitudeSmoothingEstimatorTests
     [Test]
     public void DuplicateAltitudeTimestamp_DoesNotReingestButContinuesSmoothing()
     {
-        var estimator = new VerticalAltitudeSmoothingEstimator();
+        var estimator = new VerticalAltitudeSmoothingEstimator(0.3f);
         estimator.Initialize(100L * Millisecond);
         estimator.Update(200L * Millisecond, true, -1f, 200L * Millisecond);
 
@@ -90,8 +93,9 @@ public sealed class VerticalAltitudeSmoothingEstimatorTests
 
         Assert.That(stale.state, Is.EqualTo(VerticalAltitudeLocalizationState.DegradedStale));
         Assert.That(stale.smoothedNavigationDown, Is.EqualTo(first.smoothedNavigationDown));
+        Assert.That(stale.desiredCorrection, Is.Zero);
         Assert.That(resumed.state, Is.EqualTo(VerticalAltitudeLocalizationState.Active));
-        Assert.That(resumed.smoothedNavigationDown, Is.LessThan(first.smoothedNavigationDown));
-        Assert.That(resumed.smoothedNavigationDown, Is.GreaterThan(-2f));
+        Assert.That(resumed.smoothedNavigationDown, Is.EqualTo(-2f));
+        Assert.That(resumed.alpha, Is.EqualTo(1f));
     }
 }

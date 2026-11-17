@@ -8,22 +8,16 @@ public enum VerticalAltitudeSmoothingMode
 }
 
 /// <summary>
-/// Smooths a causally selected AircraftLocation3D altitude displacement in
-/// navigation Down. The source altitude is positive-up; conversion happens in
-/// the coordinator before the target reaches this estimator.
+/// Follows a causally selected AircraftLocation3D altitude displacement in
+/// navigation Down. The coordinator converts positive-up source altitude.
 /// </summary>
 public sealed class VerticalAltitudeSmoothingEstimator
 {
-    // Conservative Step 3E.2B replay-supported tuning, not a universal optimum.
-    // Source/freshness and mapping are unchanged; confirm on the next retest.
+    // Historical exponential comparison setting. RawTarget uses zero tau.
     public const float DefaultTauSeconds = 0.3f;
     public const float DefaultMaximumAgeMilliseconds = 300f;
 
-#if DJI_VERTICAL_RAW_EXPERIMENT && !UNITY_EDITOR
     public const VerticalAltitudeSmoothingMode DefaultMode = VerticalAltitudeSmoothingMode.RawTarget;
-#else
-    public const VerticalAltitudeSmoothingMode DefaultMode = VerticalAltitudeSmoothingMode.Exponential;
-#endif
 
     private readonly float _tauSeconds;
     private bool _initialized;

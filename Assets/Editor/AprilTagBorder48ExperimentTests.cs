@@ -223,7 +223,7 @@ public sealed class AprilTagBorder48ExperimentTests
             throw new InvalidOperationException("Expected unchanged Android production configuration.");
         if (PlayerSettings.GetScriptingDefineSymbols(NamedBuildTarget.Android).Contains("DJI_APRILTAG_BORDER_48_EXPERIMENT"))
             throw new InvalidOperationException("Experiment must not be a persistent project define.");
-        var defines = new[] { "DJI_VERTICAL_RAW_EXPERIMENT", "DJI_APRILTAG_BORDER_48_EXPERIMENT" };
+        var defines = new[] { "DJI_APRILTAG_BORDER_48_EXPERIMENT" };
         Directory.CreateDirectory(Path.GetDirectoryName(output));
         var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions {
             scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray(),

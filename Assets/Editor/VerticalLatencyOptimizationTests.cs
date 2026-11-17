@@ -112,6 +112,8 @@ public sealed class VerticalLatencyOptimizationTests
         var old=new DjiWorldLocalizationShadowCoordinator();var candidate=new DjiWorldLocalizationShadowCoordinator();
         typeof(DjiWorldLocalizationShadowCoordinator).GetField("_verticalAltitudeSmoothingEstimator",BindingFlags.Instance|BindingFlags.NonPublic)
             .SetValue(old,new VerticalAltitudeSmoothingEstimator(.4f));
+        typeof(DjiWorldLocalizationShadowCoordinator).GetField("_verticalAltitudeSmoothingEstimator",BindingFlags.Instance|BindingFlags.NonPublic)
+            .SetValue(candidate,new VerticalAltitudeSmoothingEstimator(.3f));
         var samples=new List<TelemetryAircraftPositionSample>{new(Second,47,19,100)};
         foreach(var c in new[]{old,candidate}) {
             Assert.That(c.TryInitializeFromVisualMeasurement(Pose.identity,Second,true,out var reason),Is.True,reason);

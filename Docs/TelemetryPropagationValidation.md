@@ -10,6 +10,8 @@ nor crossing the short-window boundary restarts it. The board/world and model
 placements remain fixed; the estimated camera pose can use aircraft/gimbal
 orientation, admitted horizontal GNSS and fresh altitude in **both** phases.
 Missing or stale position channels retain their last contribution.
+The vertical contribution follows the latest accepted `AircraftLocation3D`
+altitude delta directly (RawTarget), without exponential smoothing.
 
 | Elapsed propagation time | Continuation | Return to visual |
 | --- | --- | --- |
