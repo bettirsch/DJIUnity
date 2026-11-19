@@ -11,6 +11,12 @@ public static class ReferenceBoardContentDefinition
     public const string DummyCubeName = "DummyCube";
     public const float DummyCubeSizeMeters = 0.14f;
 
+    // Placement reference only: vision/world coordinates remain board-centered.
+    public static Pose BoardFromRoofCanopyReference => new(
+        new Vector3(-ReferenceBoardDefinition.Default.WidthMeters * 0.5f,
+            ReferenceBoardDefinition.Default.HeightMeters * 0.5f, 0f),
+        Quaternion.identity);
+
     private static readonly Color DummyCubeColor = new(0.12f, 0.74f, 0.58f, 1f);
 
     // This rotation keeps the cube upright in the established board frame.

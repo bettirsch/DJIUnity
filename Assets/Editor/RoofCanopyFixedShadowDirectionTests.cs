@@ -119,10 +119,12 @@ public sealed class RoofCanopyFixedShadowDirectionTests
             var baseline = new Pose(new Vector3(0, 0, 2), Quaternion.identity);
             apply.Invoke(overlay, new object[] { baseline });
             visible.Invoke(overlay, new object[] { true, "VISUAL" });
-            var shadow = root.GetComponent<RoofCanopyProjectedShadows>();
+            var shadow = root.GetComponentInChildren<RoofCanopyProjectedShadows>(true);
+            Assert.That(shadow, Is.Not.Null);
             var ground = root.GetComponentsInChildren<MeshFilter>(true).Single(f => f.name.Contains("Ground Shadow"));
             var vertices = ground.sharedMesh.vertices.Select(ground.transform.TransformPoint).ToArray();
             var model = root.GetComponentsInChildren<Transform>(true).Single(t => t.name == "BoardRoofCanopy");
+            Assert.That(shadow.transform, Is.SameAs(model.parent.parent));
             var modelMatrix = model.localToWorldMatrix;
             var lightMatrix = RenderSettings.sun.transform.localToWorldMatrix;
             var settings = Resources.Load<RoofCanopyShadowSettings>("RoofCanopyShadowSettings");

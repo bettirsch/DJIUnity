@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using NUnit.Framework;
 using UnityEngine;
@@ -87,6 +88,168 @@ public sealed class DjiContentAcquisitionVisibilityTests
     }
 
     [Test]
+    public void BoardPoseRemainsCentered_WhileCanopyReferenceUsesTheOuterTopLeftCorner()
+    {
+        var board = ReferenceBoardDefinition.Default;
+        Assert.That(board.BoardOriginInBoard, Is.EqualTo(Vector3.zero));
+        Assert.That(board.WidthMeters, Is.EqualTo(.36f));
+        Assert.That(board.HeightMeters, Is.EqualTo(.36f));
+        var corner = ReferenceBoardContentDefinition.BoardFromRoofCanopyReference;
+        AssertVector(corner.position, new Vector3(-.18f, .18f, 0f));
+        Assert.That(corner.rotation, Is.EqualTo(Quaternion.identity));
+        AssertVector(board.DjiFiducialMarkers[0].CenterInBoard, new Vector3(-.09f, .09f, 0f));
+        Assert.That(Vector3.Distance(corner.position, board.DjiFiducialMarkers[0].CenterInBoard), Is.GreaterThan(.1f));
+    }
+
+    [TestCase(0f, 0f, 0f)]
+    [TestCase(19f, -31f, 72f)]
+    [TestCase(-67f, 143f, -28f)]
+    public void RotatedBoard_MapsCornerThroughNativeOpticalAndUnityViewExactlyOnce(float x, float y, float z)
+    {
+        CreateOverlay();
+        var cameraFromBoard = new Pose(new Vector3(.4f, -.2f, 3f), Quaternion.Euler(x, y, z));
+        ApplyBoardPose(cameraFromBoard);
+        var corner = Field<GameObject>("_cube").transform.parent;
+        var camera = Field<Camera>("_overlayCamera");
+        var boardRoot = Field<GameObject>("_contentRoot").transform;
+        var expectedNative = cameraFromBoard.position +
+                             cameraFromBoard.rotation * new Vector3(-.18f, .18f, 0f);
+        var expectedView = DjiSharedReferenceCubeOverlay.NativeOpticalToUnityViewBasis.MultiplyPoint3x4(expectedNative);
+        AssertVector(camera.worldToCameraMatrix.MultiplyPoint3x4(corner.position), expectedView);
+        AssertVector(boardRoot.localPosition, Vector3.zero);
+        Assert.That(boardRoot.rotation, Is.EqualTo(Quaternion.identity));
+        AssertVector(corner.localPosition, new Vector3(-.18f, .18f, 0f));
+        Assert.That(camera.worldToCameraMatrix, Is.EqualTo(
+            DjiSharedReferenceCubeOverlay.NativeOpticalToUnityViewBasis *
+            ReferenceFrameTransforms.MatrixFromPose(cameraFromBoard)));
+    }
+
+    [Test]
+    public void CanopyCornerReference_PreservesOriginalPlacementModelAndMaterials()
+    {
+        CreateOverlay();
+        var placement = Field<GameObject>("_cube").transform;
+        var corner = placement.parent;
+        var board = Field<GameObject>("_contentRoot").transform;
+        var model = placement.Find("BoardRoofCanopy");
+        var oldReference = new GameObject("Previous centered placement reference");
+        try
+        {
+            var oldPlacement = ARContentFactory.Create(ARContentType.RoofCanopy, oldReference.transform, 2).transform;
+            var oldModel = oldPlacement.Find("BoardRoofCanopy");
+            AssertVector(oldReference.transform.position, ReferenceBoardDefinition.Default.BoardOriginInBoard);
+            Assert.That(corner.parent, Is.SameAs(board));
+            AssertVector(placement.localPosition, new Vector3(-.099755391f, -.014564678f, -.086760163f));
+            AssertVector(placement.localPosition, oldPlacement.localPosition);
+            Assert.That(placement.localRotation, Is.EqualTo(oldPlacement.localRotation));
+            AssertVector(placement.localScale, Vector3.one);
+            AssertVector(corner.localScale, Vector3.one);
+            AssertVector(model.localPosition, Vector3.zero);
+            AssertVector(model.localScale, oldModel.localScale);
+            Assert.That(model.localRotation, Is.EqualTo(oldModel.localRotation));
+            foreach (Transform previous in oldModel)
+            {
+                var actual = model.Find(previous.name);
+                AssertVector(actual.position - previous.position, new Vector3(-.18f, .18f, 0f));
+                Assert.That(actual.rotation, Is.EqualTo(previous.rotation));
+                AssertVector(actual.lossyScale, previous.lossyScale);
+                Assert.That(actual.GetComponent<MeshFilter>().sharedMesh, Is.SameAs(previous.GetComponent<MeshFilter>().sharedMesh));
+                CollectionAssert.AreEqual(previous.GetComponent<Renderer>().sharedMaterials,
+                    actual.GetComponent<Renderer>().sharedMaterials);
+            }
+            var semanticAnchor = new Vector3(.099755391f, .014564678f, .086760163f);
+            AssertVector(placement.TransformPoint(semanticAnchor), corner.position);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(oldReference); }
+    }
+
+    [Test]
+    public void RepeatedConfigurationAndPoseApplication_DoNotDuplicateCornerOffset()
+    {
+        CreateOverlay();
+        var placement = Field<GameObject>("_cube");
+        var reference = placement.transform.parent;
+        var board = Field<GameObject>("_contentRoot");
+        var shadow = Field<RoofCanopyProjectedShadows>("_projectedShadows");
+        for (var i = 0; i < 5; i++)
+        {
+            _overlay.Configure(_videoObject.GetComponent<Camera>(), _provider);
+            ApplyBoardPose(new Pose(new Vector3(i, .2f, 3f), Quaternion.Euler(8, i * 10, -15)));
+            Assert.That(Field<GameObject>("_cube"), Is.SameAs(placement));
+            Assert.That(placement.transform.parent, Is.SameAs(reference));
+            AssertVector(reference.localPosition, new Vector3(-.18f, .18f, 0f));
+            Assert.That(board.transform.childCount, Is.EqualTo(2)); // Corner reference and centered board debug geometry.
+            Assert.That(reference.GetComponentsInChildren<RoofCanopyProjectedShadows>(true).Length, Is.EqualTo(1));
+            Assert.That(shadow.GeometryBuildCount, Is.EqualTo(1));
+        }
+    }
+
+    [Test]
+    public void ProjectedShadowSharesCornerReference_WhileBoardDebugGeometryStaysCentered()
+    {
+        CreateOverlay();
+        var board = Field<GameObject>("_contentRoot").transform;
+        var corner = Field<GameObject>("_cube").transform.parent;
+        var shadows = Field<RoofCanopyProjectedShadows>("_projectedShadows");
+        Assert.That(shadows.transform, Is.SameAs(corner));
+        AssertVector(shadows.transform.localPosition, new Vector3(-.18f, .18f, 0f));
+        AssertVector(board.Find("DJI Board Frame").localPosition, Vector3.zero);
+        Assert.That(shadows.GeometryBuildCount, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void CubeRemainsBoardCentered_WithoutCanopyReferenceOffset()
+    {
+        CreateOverlay(ARContentType.Cube);
+        var cube = Field<GameObject>("_cube");
+        var board = Field<GameObject>("_contentRoot").transform;
+        var material = cube.GetComponent<Renderer>().sharedMaterial;
+        try
+        {
+            Assert.That(cube.transform.parent, Is.SameAs(board));
+            AssertVector(cube.transform.localPosition, ReferenceBoardContentDefinition.BoardFromDummyCube.position);
+            Assert.That(board.Find("RoofCanopy Board Corner Reference"), Is.Null);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(material); }
+    }
+
+    [Test]
+    public void PersistentWorldVisualTelemetryAndReacquisition_ShareCornerWithoutAdditionalJump()
+    {
+        CreateOverlay();
+        const long baseline = 100_000_000L;
+        var visual = new Pose(new Vector3(.4f, -.3f, 3f), Quaternion.Euler(13f, 29f, -17f));
+        var positions = new List<TelemetryAircraftPositionSample>
+        {
+            new(baseline, 47, 19, 100),
+            new(200_000_000L, 47, 19, 100)
+        };
+        var coordinator = new DjiWorldLocalizationShadowCoordinator();
+        Assert.That(coordinator.TryInitializeFromVisualMeasurement(visual, baseline, true, out var reason), Is.True, reason);
+        var board = coordinator.Snapshot.worldFromBoard;
+        var corner = Field<GameObject>("_cube").transform.parent;
+        var camera = Field<Camera>("_overlayCamera");
+        Vector3 ApplyResolvedPose()
+        {
+            Assert.That(WorldLocalizationPoseResolver.TryGetCameraFromBoard(coordinator.Snapshot, out var resolved), Is.True);
+            ApplyBoardPose(resolved);
+            return camera.worldToCameraMatrix.MultiplyPoint3x4(corner.position);
+        }
+        var before = ApplyResolvedPose();
+        Assert.That(coordinator.Snapshot.phase, Is.EqualTo(WorldLocalizationPhase.VisualLocalized));
+        Assert.That(coordinator.TryBeginRotationPropagation(visual, baseline, Quaternion.identity, positions, 300, out reason), Is.True, reason);
+        Assert.That(coordinator.TryEvaluateRotationPropagation(200_000_000L, 200_000_000L, Quaternion.identity,
+            visual, positions, 300, out reason), Is.True, reason);
+        Assert.That(coordinator.Snapshot.phase, Is.EqualTo(WorldLocalizationPhase.Propagating));
+        AssertVector(ApplyResolvedPose(), before);
+        Assert.That(coordinator.TryUpdateFromVisualMeasurement(visual, 300_000_000L, true, positions, 300, out reason), Is.True, reason);
+        Assert.That(coordinator.Snapshot.phase, Is.EqualTo(WorldLocalizationPhase.VisualLocalized));
+        AssertVector(ApplyResolvedPose(), before);
+        Assert.That(coordinator.Snapshot.worldFromBoard, Is.EqualTo(board));
+        AssertVector(corner.localPosition, new Vector3(-.18f, .18f, 0f));
+    }
+
+    [Test]
     public void NewProviderSession_RequiresItsOwnFirstAuthoritativeAcquisition()
     {
         CreateOverlay();
@@ -132,6 +295,11 @@ public sealed class DjiContentAcquisitionVisibilityTests
         var expected = DjiSharedReferenceCubeOverlay.NativeOpticalToUnityViewBasis *
                        ReferenceFrameTransforms.MatrixFromPose(_provider.CurrentHighConfidenceCameraFromBoard);
         Assert.That(camera.worldToCameraMatrix, Is.EqualTo(expected));
+        var placement = Field<GameObject>("_cube").transform;
+        if (selection == ARContentType.RoofCanopy)
+            AssertVector(placement.parent.localPosition, new Vector3(-.18f, .18f, 0f));
+        else
+            Assert.That(placement.parent, Is.SameAs(Field<GameObject>("_contentRoot").transform));
         const float near = 0.01f;
         var previousFrustum = Matrix4x4.Frustum(-960f / 1332.7f * near, 960f / 1332.7f * near,
             -540f / 1332.7f * near, 540f / 1332.7f * near, near, 100f);
@@ -197,6 +365,12 @@ public sealed class DjiContentAcquisitionVisibilityTests
 
     private void RenderFrame() => typeof(DjiSharedReferenceCubeOverlay).GetMethod("LateUpdate", Private)
         .Invoke(_overlay, null);
+
+    private void ApplyBoardPose(Pose pose) => typeof(DjiSharedReferenceCubeOverlay)
+        .GetMethod("ApplyStandaloneBoardOverlayPose", Private).Invoke(_overlay, new object[] { pose });
+
+    private static void AssertVector(Vector3 actual, Vector3 expected) =>
+        Assert.That(Vector3.Distance(actual, expected), Is.LessThan(.00001f), $"actual={actual} expected={expected}");
 
     private void PublishAuthoritativeVisual()
     {

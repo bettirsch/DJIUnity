@@ -191,11 +191,21 @@ public sealed class DjiSharedReferenceCubeOverlay : MonoBehaviour
             return;
 
         _contentRoot = new GameObject(ReferenceBoardContentDefinition.SharedContentRootName);
-        _cube = ARContentFactory.CreateSelected(_contentRoot.transform, OverlayLayer);
-        _contentRenderers = _cube.GetComponentsInChildren<Renderer>(true);
+        var contentReference = _contentRoot.transform;
         _hasRoofCanopyContent = ARContentSelection.Selected == ARContentType.RoofCanopy;
         if (_hasRoofCanopyContent)
-            _projectedShadows = RoofCanopyProjectedShadows.Create(_contentRoot.transform, OverlayLayer);
+        {
+            var reference = new GameObject("RoofCanopy Board Corner Reference");
+            reference.layer = OverlayLayer;
+            reference.transform.SetParent(_contentRoot.transform, false);
+            var boardFromReference = ReferenceBoardContentDefinition.BoardFromRoofCanopyReference;
+            reference.transform.SetLocalPositionAndRotation(boardFromReference.position, boardFromReference.rotation);
+            contentReference = reference.transform;
+        }
+        _cube = ARContentFactory.CreateSelected(contentReference, OverlayLayer);
+        _contentRenderers = _cube.GetComponentsInChildren<Renderer>(true);
+        if (_hasRoofCanopyContent)
+            _projectedShadows = RoofCanopyProjectedShadows.Create(contentReference, OverlayLayer);
         _hasAppliedContentVisibility = false;
         SetCubeVisible(false, "WAITING_FOR_VALID_BOARD_POSE");
         ReferenceBoardDebugGeometry.CreateBoardFrame(

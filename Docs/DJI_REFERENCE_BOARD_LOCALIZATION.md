@@ -54,3 +54,14 @@ frame. If the visual pose becomes unusable, eligible DJI telemetry can
 propagate the camera pose; a new accepted visual pose restores visual
 authority. The detector and render paths use the same initial acquisition
 and visual quality requirements as before.
+
+RoofCanopy placement uses an additional translation-only reference at the
+board's upper-left outer physical corner, `(-width/2, +height/2, 0)` =
+`(-0.18, +0.18, 0)` m. The overlay composes
+`T_camera_board * T_board_corner * T_corner_placement * T_placement_model`.
+The original semantic-anchor placement offset, Rx(+90) model rotation, scale,
+mirroring and asset pivots are unchanged. The projected shadow shares this
+corner reference; board debug geometry and Cube remain board-centered.
+Both VISUAL and TELEMETRY use the same fixed content hierarchy and the existing
+native-optical-to-Unity-view basis. Neither the PnP board frame nor the
+persistent-world origin moves.
