@@ -18,14 +18,22 @@ public static class CommandLineAndroidBuild
 
     public static void BuildDetectorCaptureDiagnosticApk()
     {
-        BuildAndroidPlayer(BuildOptions.None, detectorCaptureDiagnostic: true);
+        BuildAndroidPlayer(BuildOptions.None, "DJI_EXACT_DETECTOR_CAPTURE");
     }
 
-    private static void BuildAndroidPlayer(BuildOptions options, bool detectorCaptureDiagnostic = false)
+    public static void BuildRelativePositionDiagnosticApk()
+    {
+        BuildAndroidPlayer(BuildOptions.None, "DJI_RELATIVE_POSITION_EXPERIMENT");
+    }
+
+    // Compatibility entry only; it cannot select a different feature set.
+    public static void BuildValidatedTrackingCandidateApk() => BuildApk();
+
+    private static void BuildAndroidPlayer(BuildOptions options, string diagnosticDefine = null)
     {
         var outputPath = GetArgument("-outputPath");
-        if (detectorCaptureDiagnostic && string.IsNullOrWhiteSpace(outputPath))
-            throw new ArgumentException("Missing -outputPath for the detector capture APK.");
+        if (diagnosticDefine != null && string.IsNullOrWhiteSpace(outputPath))
+            throw new ArgumentException("Missing -outputPath for the diagnostic APK.");
         outputPath ??= "build/DJIUnity.apk";
         var outputDirectory = Path.GetDirectoryName(outputPath);
         if (!string.IsNullOrEmpty(outputDirectory))
@@ -34,8 +42,10 @@ public static class CommandLineAndroidBuild
         EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
         EditorUserBuildSettings.buildAppBundle = false;
 
-        var report = BuildPipeline.BuildPlayer(
-            CreateAndroidBuildOptions(outputPath, options, detectorCaptureDiagnostic));
+        FinalBridgeArtifactGuard.ValidateCurrentProject();
+        var build = CreateAndroidBuildOptions(outputPath, options);
+        build.extraScriptingDefines = DiagnosticDefines(diagnosticDefine);
+        var report = BuildPipeline.BuildPlayer(build);
         if (report.summary.result != BuildResult.Succeeded)
         {
             throw new Exception(
@@ -57,6 +67,16 @@ public static class CommandLineAndroidBuild
             ? new[] { "DJI_EXACT_DETECTOR_CAPTURE" }
             : Array.Empty<string>()
     };
+
+    internal static string[] DiagnosticDefines(string diagnosticDefine)
+    {
+        if (diagnosticDefine == null)
+            return Array.Empty<string>();
+        if (diagnosticDefine != "DJI_EXACT_DETECTOR_CAPTURE" &&
+            diagnosticDefine != "DJI_RELATIVE_POSITION_EXPERIMENT")
+            throw new ArgumentException("Unknown diagnostic capability.", nameof(diagnosticDefine));
+        return new[] { diagnosticDefine };
+    }
 
     private static string GetArgument(string name)
     {

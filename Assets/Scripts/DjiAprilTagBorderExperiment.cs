@@ -2,17 +2,7 @@ using UnityEngine;
 
 public static class DjiAprilTagBorderExperiment
 {
-    public static bool Enabled
-    {
-        get
-        {
-#if DJI_APRILTAG_BORDER_48_EXPERIMENT
-            return true;
-#else
-            return false;
-#endif
-        }
-    }
+    public static bool Enabled => true;
 
     public static float Resolve(float productionThresholdPixels, int markerCount,
         bool isReacquisition, bool experimentEnabled) =>
@@ -25,7 +15,6 @@ public sealed partial class DjiBoardVisionProvider
 {
     private bool IsBorderExperimentReacquisition() => RequiresVisualReacquisitionHandover();
 
-#if DJI_APRILTAG_BORDER_48_EXPERIMENT
     private bool _borderDiagnosticReacquisition;
     private float _borderDiagnosticThreshold;
     private long _borderDiagnosticDwellStartNs;
@@ -61,5 +50,4 @@ public sealed partial class DjiBoardVisionProvider
         record.candidateTranslationJumpMeters = _orientationMetrics.translationJumpMeters;
         record.candidateRotationJumpDegrees = _orientationMetrics.rotationJumpDegrees;
     }
-#endif
 }

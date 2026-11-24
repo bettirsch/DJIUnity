@@ -53,17 +53,7 @@ public sealed class StaleVisualJumpCluster
 
 public static class DjiAprilTagStaleJumpExperiment
 {
-    public static bool Enabled
-    {
-        get
-        {
-#if DJI_APRILTAG_STALE_JUMP_EXPERIMENT
-            return true;
-#else
-            return false;
-#endif
-        }
-    }
+    public static bool Enabled => true;
 }
 
 public sealed partial class DjiBoardVisionProvider
@@ -162,7 +152,6 @@ public sealed partial class DjiBoardVisionProvider
         record.qualityConfirmationRequired = highConfidenceReacquisitionConfirmationFrames;
     }
 
-#if DJI_APRILTAG_STALE_JUMP_EXPERIMENT
     private bool _staleHasAppliedPose;
     private Pose _stalePreviousAppliedPose;
     private long _stalePreviousAppliedTimestampNs;
@@ -195,5 +184,4 @@ public sealed partial class DjiBoardVisionProvider
         }
         catch (Exception) { /* Logging never changes rendering. */ }
     }
-#endif
 }

@@ -1,12 +1,6 @@
-using System;
 using System.IO;
-using System.Linq;
 using NUnit.Framework;
-using UnityEditor;
-using UnityEditor.Build;
-using UnityEditor.Build.Reporting;
 using UnityEngine;
-using UnityEngine.Rendering;
 
 public sealed class RelativePositionExperimentTests
 {
@@ -53,25 +47,6 @@ public sealed class RelativePositionExperimentTests
 
     public static void BuildDiagnosticApk()
     {
-        string[] args = Environment.GetCommandLineArgs();
-        int index = Array.IndexOf(args, "-outputPath");
-        if (index < 0 || index + 1 >= args.Length) throw new ArgumentException("Missing -outputPath");
-        string output = Path.GetFullPath(args[index + 1]);
-        if (File.Exists(output)) throw new IOException("Refusing to overwrite an existing APK.");
-        if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.Android || EditorUserBuildSettings.buildAppBundle ||
-            PlayerSettings.GetScriptingBackend(NamedBuildTarget.Android) != ScriptingImplementation.IL2CPP ||
-            PlayerSettings.Android.targetArchitectures != AndroidArchitecture.ARM64 ||
-            (int)PlayerSettings.Android.minSdkVersion != 24 || (int)PlayerSettings.Android.targetSdkVersion != 36 ||
-            !PlayerSettings.GetGraphicsAPIs(BuildTarget.Android).SequenceEqual(new[] { GraphicsDeviceType.OpenGLES3 }))
-            throw new InvalidOperationException("Expected existing Android production configuration.");
-        Directory.CreateDirectory(Path.GetDirectoryName(output));
-        var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
-        {
-            scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray(),
-            locationPathName = output, target = BuildTarget.Android, options = BuildOptions.None,
-            extraScriptingDefines = new[] { "DJI_RELATIVE_POSITION_EXPERIMENT" }
-        });
-        if (report.summary.result != BuildResult.Succeeded) throw new Exception("Relative-position diagnostic build failed: " + report.summary.result);
-        Debug.Log("RELATIVE_POSITION_DIAGNOSTIC_APK_BUILD_SUCCESS path=" + output);
+        CommandLineAndroidBuild.BuildRelativePositionDiagnosticApk();
     }
 }

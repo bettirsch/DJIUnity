@@ -14,7 +14,7 @@ public sealed class RoofCanopyWallShadowExperiment : ScriptableObject
     {
         get
         {
-#if DJI_ROOFCANOPY_WALL_SHADOW_EXPERIMENT && !UNITY_EDITOR
+#if UNITY_ANDROID && !UNITY_EDITOR
             return true;
 #else
             return false;

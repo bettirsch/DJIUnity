@@ -77,6 +77,7 @@ public sealed class NoMarkersQualityLossExperimentTests
     [TestCase(true, -12, 0, false)] [TestCase(true, -13, 0, false)]
     public void OnlyProvenZeroDetectionChangesQuality(bool enabled, int status, int count, bool lost)
     {
+        // The false cases are offline legacy comparisons, never shipping profiles.
         Process(Result(_baseline + Ms, status, count), enabled);
         Assert.That(_board.CurrentVisualPoseQuality, Is.EqualTo(lost
             ? DjiBoardVisionProvider.VisualPoseQuality.Unavailable : DjiBoardVisionProvider.VisualPoseQuality.HighConfidence));
@@ -223,6 +224,17 @@ public sealed class NoMarkersQualityLossExperimentTests
         float age, float distance, float angle, int dwellMs, bool highConfidence,
         bool hasBracket, bool hasLongLivedPrediction, bool accepted)
     {
+        // Preserve the original offline handover contract, including its long-
+        // outage rotation bypass. Final validated behavior has separate cases below.
+        Set("_validatedTrackingSafetyEnabled", false);
+        AssertTelemetryHandover(age, distance, angle, dwellMs, highConfidence,
+            hasBracket, hasLongLivedPrediction, accepted);
+    }
+
+    private void AssertTelemetryHandover(
+        float age, float distance, float angle, int dwellMs, bool highConfidence,
+        bool hasBracket, bool hasLongLivedPrediction, bool accepted)
+    {
         AddTelemetry();
         Set("<CurrentRenderPoseSource>k__BackingField", DjiRenderPoseSource.TelemetryPropagated);
         Set("_shadowPropagationActive", true);
@@ -246,10 +258,25 @@ public sealed class NoMarkersQualityLossExperimentTests
         Set("_visualReacquisitionCandidateResult", Result(timestamp, 0, 4));
         Set("_visualReacquisitionCandidateMetrics", metrics);
 
-        Call("TryCompleteVisualReacquisitionHandoverAtAge", age);
+        if ((bool)Get("_validatedTrackingSafetyEnabled"))
+        {
+            // Seed two actually checked source samples, not a pre-aged dwell
+            // timestamp that could grant credit to one unverified frame.
+            var firstNs = timestamp - dwellMs * Ms;
+            var firstMetrics = Activator.CreateInstance(metricsType, new object[] {
+                firstNs, 4, 16, "0,1,2,3", 1f, 1f, 100f, .01f, .01f, 100f, 10000f,
+                candidate, 0f, 0f, .1f, false, 0f, false, 0f });
+            Call("OfferVisualReacquisitionCandidate", Result(firstNs, 0, 4), firstMetrics, false, firstNs);
+            Call("TryCompleteVisualReacquisitionHandoverAtTime", age, firstNs);
+            Call("OfferVisualReacquisitionCandidate", Result(timestamp, 0, 4), metrics, false, timestamp);
+            Call("TryCompleteVisualReacquisitionHandoverAtTime", age, timestamp);
+        }
+        else Call("TryCompleteVisualReacquisitionHandoverAtAge", age);
 
         Assert.That(Get("_propagationStartTimestampNs"), Is.EqualTo(propagationStartNs));
-        Assert.That(Get("_hasVisualReacquisitionCandidate"), Is.EqualTo(!accepted));
+        var safetyCancelled = (bool)Get("_validatedTrackingSafetyEnabled") && hasBracket &&
+            (angle > 6f || (age <= 2f && distance > 1f));
+        Assert.That(Get("_hasVisualReacquisitionCandidate"), Is.EqualTo(!accepted && !safetyCancelled));
         Assert.That(Get("_currentHighConfidenceVisualTimestampNs"), Is.EqualTo(accepted ? timestamp : _baseline));
         if (accepted)
         {
@@ -262,6 +289,77 @@ public sealed class NoMarkersQualityLossExperimentTests
             Assert.That(_board.CurrentRenderPoseSource, Is.EqualTo(DjiRenderPoseSource.TelemetryPropagated));
             Call("CancelVisualReacquisition", "TEST_REJECTED_VISUAL_CANDIDATE");
             Assert.That(Get("_propagationStartTimestampNs"), Is.EqualTo(propagationStartNs));
+        }
+    }
+
+    [TestCase(1.999f, 0f, 0f, 250, true, true)]
+    [TestCase(2f, 1.1f, 0f, 250, true, false)]
+    [TestCase(2.001f, 10f, 0f, 250, true, true)]
+    [TestCase(30f, 10f, 0f, 249, true, false)]
+    [TestCase(30f, 10f, 0f, 250, true, true)]
+    [TestCase(30f, 0f, 45f, 250, true, false)]
+    [TestCase(30f, 0f, 90f, 250, true, false)]
+    [TestCase(30f, 0f, 90f, 1000, true, false)]
+    [TestCase(30f, 0f, 0f, 250, false, false)]
+    public void RestoredCandidate_LongOutageChecksRotationButAllowsLargePositionCorrection(
+        float age, float distance, float angle, int dwell, bool hasBracket, bool accepted)
+    {
+        Assert.That(Get("_validatedTrackingSafetyEnabled"), Is.True, "Normal providers require validated tracking.");
+        AssertTelemetryHandover(
+            age, distance, angle, dwell, true, hasBracket, true, accepted);
+    }
+
+    [Test]
+    public void RestoredCandidate_ExecutedMultiStartResultTraversesActualProcessAndHandover()
+    {
+        Assert.That(Get("_validatedTrackingSafetyEnabled"), Is.True);
+        SelectedMultiStartPose_ReacquiresOnlyAfterExistingConfirmationAndDwell();
+    }
+
+    [Test]
+    public void RestoredCandidate_StalePositiveDoesNotRejuvenateVisualOrReplaceBaseline()
+    {
+        Assert.That(Get("_validatedTrackingSafetyEnabled"), Is.True);
+        var fixture = JsonUtility.FromJson<NativeFixture>(File.ReadAllText(Path.Combine(
+            RequireReplayDirectory("DJI_MULTISTART_FIXTURE_DIR"), "selected-native-unity-fixture.json")));
+        var result = fixture.result;
+        result.timestampNs = result.visionFrameTimestampNs = _baseline + Ms;
+        Call("ProcessResultWithQualityLossExperiment", result, _baseline + 3000 * Ms, true);
+        AssertBaseline();
+        Assert.That(Get("_hasVisualReacquisitionCandidate"), Is.False);
+        Assert.That(_board.CurrentVisualPoseQuality, Is.EqualTo(DjiBoardVisionProvider.VisualPoseQuality.HighConfidence));
+    }
+
+    [Test]
+    public void RestoredCandidate_AlternatingWrongBranchesCannotContributeToCorrectDwell()
+    {
+        Assert.That(Get("_validatedTrackingSafetyEnabled"), Is.True);
+        AddTelemetry();
+        var telemetry = (DjiCameraPoseProvider)Get("_telemetryProvider");
+        var history = (List<DjiCameraPoseProvider.TelemetryOrientationSample>)typeof(DjiCameraPoseProvider)
+            .GetField("_telemetryOrientationHistory", Private).GetValue(telemetry);
+        foreach (var t in new[] { 1600, 1650 })
+            history.Add(new DjiCameraPoseProvider.TelemetryOrientationSample(t * Ms, Quaternion.identity, true, 0, 0));
+        Set("<CurrentRenderPoseSource>k__BackingField", DjiRenderPoseSource.TelemetryPropagated);
+        Set("_shadowPropagationActive", true); Set("_hasLatestShadowPrediction", true);
+        var mode = typeof(DjiBoardVisionProvider).GetNestedType("VisualReacquisitionMode", BindingFlags.NonPublic);
+        Set("_visualReacquisitionMode", Enum.Parse(mode, "PropagatedReacquisition"));
+        var metricsType = typeof(DjiBoardVisionProvider).GetNestedType("VisualPoseMetrics", BindingFlags.NonPublic);
+        foreach (var step in new[] { (1100, 45f), (1200, 0f), (1300, 90f), (1400, 0f), (1500, 0f), (1600, 0f), (1650, 0f) })
+        {
+            var ns = step.Item1 * Ms;
+            var pose = new Pose(_visual.position + Vector3.right * 10,
+                _visual.rotation * Quaternion.AngleAxis(step.Item2, Vector3.up));
+            var metrics = Activator.CreateInstance(metricsType, new object[] {
+                ns, 4, 16, "0,1,2,3", 1f, 1f, 100f, .01f, .01f, 100f, 10000f,
+                pose, 0f, 0f, .1f, false, 0f, false, 0f });
+            if (!(bool)Get("_hasVisualReacquisitionCandidate")) Set("_visualReacquisitionStartTimestampNs", ns);
+            Set("_hasVisualReacquisitionCandidate", true);
+            Set("_visualReacquisitionCandidateMetrics", metrics);
+            Set("_visualReacquisitionCandidateResult", Result(ns, 0, 4));
+            Call("OfferVisualReacquisitionCandidate", Result(ns, 0, 4), metrics, false, ns);
+            Call("TryCompleteVisualReacquisitionHandoverAtTime", 30f, ns);
+            Assert.That(Get("_currentHighConfidenceVisualTimestampNs"), Is.EqualTo(step.Item1 == 1650 ? ns : _baseline));
         }
     }
 
@@ -296,6 +394,7 @@ public sealed class NoMarkersQualityLossExperimentTests
     [TestCase(false)] [TestCase(true)]
     public void RecordedOctober29NegativeFrames_ReproduceLegacyOrImmediateQualityLoss(bool enabled)
     {
+        // The false case replays the offline baseline; normal ProcessResult is ON.
         var replay = JsonUtility.FromJson<Replay>(File.ReadAllText(Path.Combine(
             RequireReplayDirectory("DJI_NO_MARKERS_FIXTURE_DIR"), "oct29-fixture.json")));
         _visual = new Pose(replay.position, replay.rotation); _baseline = replay.baselineTimestampNs;
@@ -352,7 +451,7 @@ public sealed class NoMarkersQualityLossExperimentTests
             var estimate = coordinator.LatestHorizontalGnssSmoothingShadow.estimate;
             Assert.That(estimate.rawGnssTargetTimestampNs, Is.LessThanOrEqualTo(application.timestampNs));
             AssertPose(coordinator.Snapshot.worldFromBoard, Pose.identity);
-            if (estimate.rawGnssTarget.magnitude <= .08f)
+            if (estimate.rawGnssTarget.magnitude < HorizontalGnssSmoothingEstimator.ProvisionalStationaryNoiseEnvelopeMeters)
                 Assert.That(estimate.smoothedNavigationDelta.magnitude, Is.EqualTo(0), "Existing stationary HOLD remains active.");
             csv.AppendFormat(System.Globalization.CultureInfo.InvariantCulture, "{0},{1},{2},{3:R},{4:R},{5:R},{6:R},{7:R},{8:R},{9}\n",
                 application.timestampNs, application.attitudeTimestampNs, estimate.rawGnssTargetTimestampNs,
@@ -392,11 +491,34 @@ public sealed class NoMarkersQualityLossExperimentTests
 
     [Test] public void DefaultExperimentOff_AndThresholdsUnchanged()
     {
-        Assert.That(DjiAprilTagNoMarkersQualityLossExperiment.Enabled, Is.False);
+        // Historical ID retained; the normal entry point now applies quality loss.
+        Assert.That(DjiAprilTagNoMarkersQualityLossExperiment.Enabled, Is.True);
+        Assert.That(Get("_validatedTrackingSafetyEnabled"), Is.True);
         Assert.That(Get("maxRotationOnlyPropagationSeconds"), Is.EqualTo(2f));
         Assert.That(Get("reacquisitionStableTimeSeconds"), Is.EqualTo(.25f));
         Assert.That(Get("reacquisitionMaximumRotationDifferenceDegrees"), Is.EqualTo(6f));
         Assert.That(Get("highConfidenceMinimumBorderDistancePixels"), Is.EqualTo(64f));
+        Call("ProcessResult", Result(_baseline + Ms), _baseline + 2 * Ms);
+        Assert.That(_board.CurrentVisualPoseQuality, Is.EqualTo(DjiBoardVisionProvider.VisualPoseQuality.Unavailable));
+        AssertBaseline();
+    }
+
+    [Test]
+    public void NormalProcessResult_MatchesExplicitQualityLossAndKeepsTheAcceptedBaseline()
+    {
+        AddTelemetry();
+        Call("ProcessResult", Result(_baseline + Ms), _baseline + 2 * Ms);
+        Assert.That(_board.CurrentVisualPoseQuality, Is.EqualTo(DjiBoardVisionProvider.VisualPoseQuality.Unavailable));
+        Assert.That(_board.TryGetRenderCameraFromBoard(2, out var normalPose, out var normalSource, out _), Is.True);
+        Assert.That(normalSource, Is.EqualTo(DjiRenderPoseSource.TelemetryPropagated));
+        AssertPose(normalPose, _visual);
+        AssertBaseline();
+        SeedVisual(_visual, _baseline);
+        Process(Result(_baseline + 3 * Ms, sequence: 2), true);
+        Assert.That(_board.TryGetRenderCameraFromBoard(2, out var explicitPose, out var explicitSource, out _), Is.True);
+        Assert.That(explicitSource, Is.EqualTo(normalSource));
+        AssertPose(explicitPose, normalPose);
+        AssertBaseline();
     }
 
     private static string RequireReplayDirectory(string variable)

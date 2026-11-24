@@ -33,8 +33,15 @@ public sealed class AprilTagStaleJumpExperimentTests
     [Test]
     public void NormalBuild_DoesNotEnableExperiment()
     {
-        Assert.That(DjiAprilTagStaleJumpExperiment.Enabled, Is.False);
+        // Historical ID retained; OFF is only an explicit offline comparison.
+        Assert.That(DjiAprilTagStaleJumpExperiment.Enabled, Is.True);
         Assert.That(Reason(Evaluate(Metrics(), stale: false)), Is.EqualTo("POSE_TRANSLATION_JUMP_SEVERE"));
+        var normal = typeof(DjiBoardVisionProvider).GetMethod("EvaluateVisualPoseQuality", Private)
+            .Invoke(_board, new[] { Metrics() });
+        Assert.That(Reason(normal), Is.Empty);
+        Assert.That(Cluster.Active, Is.True);
+        Assert.That(Cluster.Count, Is.EqualTo(1));
+        Assert.That(Get("_currentHighConfidenceVisualTimestampNs"), Is.EqualTo(1000 * Ms));
         Assert.That(Get("motionAwareImmediateTranslationJumpRejectMeters"), Is.EqualTo(.15f));
     }
 
@@ -227,8 +234,8 @@ public sealed class AprilTagStaleJumpExperimentTests
             new Pose(new Vector3(x, 0, 2), Quaternion.identity), jump, rotation, gap,
             false, float.NaN, false, float.NaN });
     private object Evaluate(object metrics, bool border = true, bool stale = true) =>
-        typeof(DjiBoardVisionProvider).GetMethod("EvaluateVisualPoseQualityForExperiments", Private)
-            .Invoke(_board, new[] { metrics, (object)border, stale });
+        typeof(DjiBoardVisionProvider).GetMethod("EvaluateVisualPoseQualityForAllExperiments", Private)
+            .Invoke(_board, new[] { metrics, (object)border, stale, false });
     private static string Reason(object evaluation) => (string)evaluation.GetType().GetField("reason").GetValue(evaluation);
     private void Apply(object metrics, object evaluation) => typeof(DjiBoardVisionProvider)
         .GetMethod("UpdateVisualPoseQuality", Private, null, new[] { MetricsType, evaluation.GetType() }, null)

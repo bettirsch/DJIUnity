@@ -139,7 +139,8 @@ public sealed class RoofCanopyWallShadowTests
         try
         {
             geometry.geometryVerified=true;geometry.sourceFbxSha256=source.sourceFbxSha256;geometry.wallOffset=-.003f;
-            Assert.That(RoofCanopyWallShadowExperiment.TryCreateSettings(source,geometry,false,out var none),Is.False);
+            Assert.That(RoofCanopyWallShadowExperiment.TryCreateSettings(source,geometry,
+                RoofCanopyWallShadowExperiment.Enabled,out var none),Is.False);
             Assert.That(none,Is.Null);
             Assert.That(RoofCanopyWallShadowExperiment.TryCreateSettings(source,geometry,true,out var clone),Is.True);
             try

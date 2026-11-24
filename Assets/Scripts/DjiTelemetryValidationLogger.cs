@@ -114,6 +114,7 @@ public sealed partial class DjiTelemetryValidationLogger : MonoBehaviour
             _writeFailureLogged = false;
             _hasNormalTelemetryState = false;
             _hadVisual = false;
+            ResetReacquisitionEventLogging();
             DjiLogMaintenance.Start(_sessionDirectory, _telemetrySessionId, _sessionIsDiagnostic);
             if (!_sessionIsDiagnostic)
             {

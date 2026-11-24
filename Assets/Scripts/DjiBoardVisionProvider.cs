@@ -68,8 +68,6 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
     [Header("Rotation-Only Propagation")]
     [Tooltip("Enabled renders the validated rotation-only prediction while a recent visual board pose is unavailable.")]
     [SerializeField] private RotationPropagationMode rotationPropagationMode = RotationPropagationMode.Enabled;
-    [Tooltip("Developer-only override for unvalidated builds. Normal builds are enabled by the physical yaw-validation safety gate.")]
-    [SerializeField] private bool allowUnvalidatedRotationPropagationForDeveloperTesting;
     [Tooltip("Conservative diagnostic limit. Rotation-only propagation has no camera translation.")]
     [SerializeField, Min(0.1f)] private float maxRotationOnlyPropagationSeconds = 2f;
     [SerializeField, Min(0.1f)] private float shadowPropagationLogIntervalSeconds = 1f;
@@ -430,12 +428,10 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
     /// </summary>
     public void RecordVisualPoseAppliedForRender(Pose? appliedPose = null)
     {
-#if DJI_APRILTAG_BORDER_RETENTION_EXPERIMENT
+        if (_validatedTrackingSafetyEnabled && appliedPose.HasValue)
+            TraceCandidateAppliedOrientation(appliedPose.Value);
         if (appliedPose.HasValue) TraceBorderRetentionVisualApplication(appliedPose.Value);
-#endif
-#if DJI_APRILTAG_STALE_JUMP_EXPERIMENT
         if (appliedPose.HasValue) TraceStaleJumpAppliedPose(appliedPose.Value);
-#endif
         if (appliedPose.HasValue && DetailedLogging)
             _telemetryValidationLogger?.RecordMotionPoseApplied(
                 DjiBoardVisionBridge.GetMonotonicTimestampNs(), CurrentRenderPoseSource, appliedPose.Value);
@@ -792,7 +788,6 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
     private PairedRotationDiagnosticSample _stationaryRotationDiagnosticReference;
     private bool _hasLastPairedRotationDiagnosticSample;
     // Validated on the physical Mini 3 Pro with controlled signed-yaw and gimbal-pitch sweeps.
-    private const bool SafeForRotationOnlyPropagation = true;
     private ShadowRotationPropagationBaseline _shadowRotationPropagationBaseline;
     private bool _hasShadowRotationPropagationBaseline;
     private bool _shadowPropagationActive;
@@ -908,8 +903,8 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
 
     private bool IsRotationPropagationRenderingEnabled => RotationPropagationRenderPolicy.IsEnabledAllowed(
         rotationPropagationMode,
-        SafeForRotationOnlyPropagation,
-        allowUnvalidatedRotationPropagationForDeveloperTesting);
+        true,
+        false);
 
     private float BaselineAgeSeconds => _hasShadowRotationPropagationBaseline
         ? Mathf.Max(0f, (float)((DjiBoardVisionBridge.GetMonotonicTimestampNs() - _shadowRotationPropagationBaseline.timestampNs) / 1_000_000_000.0))
@@ -1597,15 +1592,6 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
         ApplyDroneViewStartupDefaults();
         _localizationSessionId = 0;
         _outageVisualGroundTruth.Reset();
-        if (rotationPropagationMode == RotationPropagationMode.Enabled &&
-            !SafeForRotationOnlyPropagation &&
-            !allowUnvalidatedRotationPropagationForDeveloperTesting)
-        {
-            rotationPropagationMode = RotationPropagationMode.ShadowDiagnostic;
-            Debug.LogWarning(
-                "DJI_ROTATION_PROPAGATION_BLOCKED reason=SAFETY_VALIDATION_REQUIRED " +
-                "requested=Enabled applied=ShadowDiagnostic");
-        }
         _telemetryProvider = FindFirstObjectByType<DjiCameraPoseProvider>();
         _telemetryValidationLogger = GetComponent<DjiTelemetryValidationLogger>() ??
                                       gameObject.AddComponent<DjiTelemetryValidationLogger>();
@@ -1614,8 +1600,8 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
         Debug.Log(
             $"DJI_ROTATION_PROPAGATION_CAPABILITY mode={rotationPropagationMode} " +
             $"hasTelemetryOrientation={HasTelemetryOrientation} hasTelemetryPosition={HasTelemetryPosition} " +
-            $"capability=ROTATION_ONLY_ZERO_TRANSLATION safeForRotationOnlyPropagation={SafeForRotationOnlyPropagation} " +
-            $"developerOverride={allowUnvalidatedRotationPropagationForDeveloperTesting} renderingSource=VISUAL_ONLY");
+            "capability=ROTATION_ONLY_ZERO_TRANSLATION safeForRotationOnlyPropagation=true " +
+            "renderingSource=VISUAL_ONLY");
         Debug.Log(
             "DJI_GUARDED_HORIZONTAL_CAPABILITY " +
             $"mode={horizontalTranslationRenderMode} minPropagationAgeMs={guardedHorizontalRenderConfiguration.minPropagationAgeMilliseconds:F0} " +
@@ -1649,6 +1635,9 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
         EnsureTelemetryRotationSubscription();
         var nowTimestampNs = DjiBoardVisionBridge.GetMonotonicTimestampNs();
         ProcessPendingRotationDiagnosticSamples(nowTimestampNs);
+        if (_validatedTrackingSafetyEnabled && _hasVisualReacquisitionCandidate)
+            TryCompleteVisualReacquisitionHandoverAtTime(
+                RotationPropagationTiming.AgeSeconds(nowTimestampNs, _propagationStartTimestampNs), nowTimestampNs);
         UpdateShadowPropagationState(rotationComparisonStaleTimeoutSeconds);
         if ((_hasRotationComparisonBaseline || _pendingRotationDiagnosticSamples.Count > 0) &&
             AcceptedCameraFromBoardAgeSeconds > rotationComparisonStaleTimeoutSeconds)
@@ -1712,6 +1701,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
 
     private void OnDisable()
     {
+        ClearVisualReacquisitionCandidate();
         // A disabled provider must never resume a later DroneView session with
         // an old horizontal correction still armed or blended in.
         _worldLocalizationShadow?.ResetHorizontalGnssWorldShadowOutage();
@@ -1820,6 +1810,17 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
     private void ProcessResultWithQualityLossExperiment(
         NativeBoardResult result, long poseDeliveredToUnityTimestampNs, bool noMarkersExperimentEnabled)
     {
+        if (_validatedTrackingSafetyEnabled && result.status >= 0 && result.markerCount > 0 &&
+            (!DjiValidatedTrackingCandidate.IsFreshPositiveSource(GetVisionTimestamp(result),
+                poseDeliveredToUnityTimestampNs, _currentHighConfidenceVisualTimestampNs) ||
+             _noMarkersFrameOrder.Evaluate(GetVisionTimestamp(result), result.listenerGeneration,
+                 result.frameSequence, _currentHighConfidenceVisualTimestampNs) != NoMarkersQualityLossDecision.Applied))
+        {
+            // Ignore stale/reordered positive results without invalidating a
+            // newer accepted pose or restarting its exact telemetry baseline.
+            Reject("VISUAL_SOURCE_STALE_OR_OUT_OF_ORDER");
+            return;
+        }
         if (TryHandleNoMarkersQualityLoss(result, poseDeliveredToUnityTimestampNs, noMarkersExperimentEnabled))
             return;
 
@@ -1927,10 +1928,11 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
         {
             if (RequiresVisualReacquisitionHandover())
             {
-                ObserveVisualReacquisitionCandidate(
+                ObserveVisualReacquisitionCandidateAtTimestamp(
                     result,
                     visualPoseMetrics,
-                    shouldLogDiagnosticSnapshot);
+                    shouldLogDiagnosticSnapshot,
+                    poseDeliveredToUnityTimestampNs);
             }
             else if (_holdingVisualAuthorityForTranslationJumpSuspect || _holdingVisualAuthorityForBorderlineQuality)
             {
@@ -2726,11 +2728,32 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
             shouldLogDiagnosticSnapshot);
     }
 
+#if UNITY_EDITOR
+    // Retained only for explicit historical-policy comparison fixtures.
+    private bool _validatedTrackingSafetyEnabled = true;
+#else
+    private const bool _validatedTrackingSafetyEnabled = true;
+#endif
+
     private void ObserveVisualReacquisitionCandidate(
         NativeBoardResult result,
         VisualPoseMetrics metrics,
-        bool shouldLogDiagnosticSnapshot)
+        bool shouldLogDiagnosticSnapshot) => ObserveVisualReacquisitionCandidateAtTimestamp(
+            result, metrics, shouldLogDiagnosticSnapshot, DjiBoardVisionBridge.GetMonotonicTimestampNs());
+
+    private void ObserveVisualReacquisitionCandidateAtTimestamp(
+        NativeBoardResult result, VisualPoseMetrics metrics, bool shouldLogDiagnosticSnapshot, long nowNs)
     {
+        OfferVisualReacquisitionCandidate(result, metrics, shouldLogDiagnosticSnapshot, nowNs);
+        TryCompleteVisualReacquisitionHandoverAtTime(
+            RotationPropagationTiming.AgeSeconds(nowNs, _propagationStartTimestampNs), nowNs);
+    }
+
+    private void OfferVisualReacquisitionCandidate(
+        NativeBoardResult result, VisualPoseMetrics metrics, bool shouldLogDiagnosticSnapshot, long nowNs)
+    {
+        if (_validatedTrackingSafetyEnabled && _visualReacquisitionMode != VisualReacquisitionMode.FreshRelocalization &&
+            !PrepareReacquisitionEvidenceOffer(result, metrics, nowNs)) return;
         if (!_hasVisualReacquisitionCandidate)
         {
             _hasVisualReacquisitionCandidate = true;
@@ -2751,7 +2774,8 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
         _visualReacquisitionCandidateResult = result;
         _visualReacquisitionCandidateMetrics = metrics;
         _visualReacquisitionCandidateShouldLogDiagnosticSnapshot |= shouldLogDiagnosticSnapshot;
-        TryCompleteVisualReacquisitionHandover();
+        if (_validatedTrackingSafetyEnabled && _visualReacquisitionMode != VisualReacquisitionMode.FreshRelocalization)
+            _reacquisitionEvidence.Enqueue(new PendingReacquisitionEvidence(result, metrics, nowNs, shouldLogDiagnosticSnapshot));
     }
 
     private void TryCompleteVisualReacquisitionHandover()
@@ -2761,6 +2785,9 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
     }
 
     private void TryCompleteVisualReacquisitionHandoverAtAge(float propagationAgeSeconds)
+        => TryCompleteVisualReacquisitionHandoverAtTime(propagationAgeSeconds, DjiBoardVisionBridge.GetMonotonicTimestampNs());
+
+    private void TryCompleteVisualReacquisitionHandoverAtTime(float propagationAgeSeconds, long nowNs)
     {
         if (!_hasVisualReacquisitionCandidate)
             return;
@@ -2793,6 +2820,12 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
             return;
         }
 
+        if (_validatedTrackingSafetyEnabled)
+        {
+            TryCompleteValidatedReacquisition(propagationAgeSeconds, nowNs);
+            return;
+        }
+
         // Telemetry propagation intentionally survives the normal two-second
         // window and can accumulate real GNSS error. Its return to vision is a
         // relocalization: keep the visual quality/dwell requirements, but do
@@ -2817,7 +2850,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
                 Debug.Log(
                     "DJI_VISUAL_REACQUISITION_PENDING " +
                     $"ageMs={GetVisualReacquisitionAgeMilliseconds():F1} " +
-                    "mode=LONG_LIVED_TELEMETRY poseConsistency=SKIPPED");
+                    $"mode=LONG_LIVED_TELEMETRY rotationConsistency={(_validatedTrackingSafetyEnabled ? "REQUIRED" : "LEGACY")} positionConsistency=SKIPPED");
             }
             if (!longLivedReady)
                 return;
@@ -2836,7 +2869,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
             Debug.Log(
                 "DJI_VISUAL_REACQUISITION_ACCEPTED " +
                 $"dwellMs={longLivedDwellMilliseconds:F1} " +
-                "mode=LONG_LIVED_TELEMETRY poseConsistency=SKIPPED " +
+                $"mode=LONG_LIVED_TELEMETRY rotationConsistency={(_validatedTrackingSafetyEnabled ? "CHECKED" : "LEGACY")} positionConsistency=SKIPPED " +
                 HorizontalRenderModeLogFields());
             return;
         }
@@ -2927,6 +2960,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
 
     private void ClearVisualReacquisitionCandidate()
     {
+        ResetReacquisitionEvidence();
         _hasVisualReacquisitionCandidate = false;
         _visualReacquisitionCandidateResult = null;
         _visualReacquisitionStartTimestampNs = RotationPropagationTiming.NoTimestamp;
@@ -5085,7 +5119,7 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
             !_hasLatestHybridPositionShadow &&
             _propagationStartTimestampNs == RotationPropagationTiming.NoTimestamp &&
             _translationShadowStartTimestampNs == RotationPropagationTiming.NoTimestamp &&
-            !_hasPendingReacquisition)
+            !_hasPendingReacquisition && !_hasVisualReacquisitionCandidate)
             return;
 
         _hasShadowRotationPropagationBaseline = false;
@@ -5140,6 +5174,9 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
     }
 
     private void OnTelemetryOrientationRecorded(DjiCameraPoseProvider.TelemetryOrientationSample sample)
+        => OnTelemetryOrientationRecordedAtTimestamp(sample, DjiBoardVisionBridge.GetMonotonicTimestampNs());
+
+    private void OnTelemetryOrientationRecordedAtTimestamp(DjiCameraPoseProvider.TelemetryOrientationSample sample, long nowNs)
     {
         if (!sample.hasOrientation)
         {
@@ -5149,7 +5186,9 @@ public sealed partial class DjiBoardVisionProvider : MonoBehaviour
 
         UpdateShadowPrediction(sample.timestampNs, sample.navigationFromCameraRotation);
         ProcessPendingRotationDiagnosticSamples(sample.timestampNs);
-        TryCompleteVisualReacquisitionHandover();
+        if (_hasVisualReacquisitionCandidate)
+            TryCompleteVisualReacquisitionHandoverAtTime(
+                RotationPropagationTiming.AgeSeconds(nowNs, _propagationStartTimestampNs), nowNs);
     }
 
     private void OnTelemetryVelocityRecorded(DjiCameraPoseProvider.TelemetryVelocitySample sample)

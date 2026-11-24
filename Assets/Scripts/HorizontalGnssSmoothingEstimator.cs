@@ -7,11 +7,11 @@ using UnityEngine;
 /// </summary>
 public sealed class HorizontalGnssSmoothingEstimator
 {
-    public const float DefaultTauSeconds = 0.5f;
+    public const float DefaultTauSeconds = 0.25f;
     public const float DefaultMaximumCorrectionSpeedMetersPerSecond = 2.5f;
     // Provisional physical-test tuning: reject short-term GNSS wander until it
     // persists across two causally ordered samples in a consistent direction.
-    public const float ProvisionalStationaryNoiseEnvelopeMeters = 0.08f;
+    public const float ProvisionalStationaryNoiseEnvelopeMeters = 0.04f;
     public const int ProvisionalTemporalConsistencySampleCount = 2;
     private const float ConsistentDirectionDotProduct = 0.5f;
 

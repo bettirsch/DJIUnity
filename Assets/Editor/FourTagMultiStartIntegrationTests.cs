@@ -74,6 +74,9 @@ public sealed class FourTagMultiStartIntegrationTests
     [TestCase(true, true, false)] [TestCase(true, true, true)]
     public void SelectedPose_StillRequiresConfirmationDwellAndActualCameraApplication(bool border, bool stale, bool retention)
     {
+        // This offline policy matrix intentionally isolates the legacy handover:
+        // synthetic Observe calls have no arrival clock or validated source queue.
+        Set("_validatedTrackingSafetyEnabled", false);
         for (var t = 1000; t <= 1500; t += 100)
         {
             var metrics = Metrics(t);
@@ -98,6 +101,7 @@ public sealed class FourTagMultiStartIntegrationTests
     [Test]
     public void SelectedNativeTransport_TraversesRealProcessResultWithoutAdmissionShortcut()
     {
+        Assert.That(Get("_validatedTrackingSafetyEnabled"), Is.True, "Real transport uses the normal validated policy.");
         Set("<HasHighConfidenceCameraFromBoard>k__BackingField", true);
         Set("<CurrentHighConfidenceCameraFromBoard>k__BackingField", _selected);
         Set("_currentHighConfidenceVisualTimestampNs", 500 * Ms);
@@ -105,7 +109,7 @@ public sealed class FourTagMultiStartIntegrationTests
         {
             var result = JsonUtility.FromJson<DjiBoardVisionProvider.NativeBoardResult>(JsonUtility.ToJson(_fixture.result));
             result.timestampNs = result.visionFrameTimestampNs = t * Ms;
-            result.visionFrameId = t;
+            result.visionFrameId = result.frameSequence = t;
             Call("ProcessResult", result, t * Ms + 10 * Ms);
             if (t < 1500) Assert.That(Get("_currentHighConfidenceVisualTimestampNs"), Is.EqualTo(500 * Ms));
         }
@@ -147,9 +151,13 @@ public sealed class FourTagMultiStartIntegrationTests
     [Test]
     public void NormalEditorFlagsAndExistingThresholds_AreNotChangedByNativeExperiment()
     {
-        Assert.That(DjiAprilTagBorderExperiment.Enabled, Is.False);
-        Assert.That(DjiAprilTagStaleJumpExperiment.Enabled, Is.False);
-        Assert.That(DjiAprilTagBorderRetentionExperiment.Enabled, Is.False);
+        // Keep the historical ID while checking the consolidated normal defaults.
+        Assert.That(DjiAprilTagBorderExperiment.Enabled, Is.True);
+        Assert.That(DjiAprilTagStaleJumpExperiment.Enabled, Is.True);
+        Assert.That(DjiAprilTagBorderRetentionExperiment.Enabled, Is.True);
+        Assert.That(DjiAprilTagNoMarkersQualityLossExperiment.Enabled, Is.True);
+        Assert.That(DjiValidatedTrackingCandidate.Enabled, Is.True);
+        Assert.That(Get("_validatedTrackingSafetyEnabled"), Is.True);
         Assert.That(Get("highConfidenceMinimumBorderDistancePixels"), Is.EqualTo(64f));
         Assert.That(Get("highConfidenceMaximumFrameRotationJumpDegrees"), Is.EqualTo(10f));
         Assert.That(Get("reacquisitionMaximumRotationDifferenceDegrees"), Is.EqualTo(6f));

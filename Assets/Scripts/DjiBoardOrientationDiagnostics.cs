@@ -49,9 +49,7 @@ public sealed partial class DjiBoardVisionProvider
         _orientationDiagnosticQualityReason = null;
         _orientationPromoted = false;
         _orientationMetrics = default;
-#if DJI_APRILTAG_BORDER_48_EXPERIMENT
         BeginBorderExperimentDiagnostic(result);
-#endif
     }
 
     private void EndOrientationCandidate(NativeBoardResult result, long arrival)
@@ -76,15 +74,9 @@ public sealed partial class DjiBoardVisionProvider
             r.hasQualityMetrics = _orientationMetrics.timestampNs == r.imageTimeNs && _orientationMetrics.markerCount > 0;
             r.normalizedCornerResidual = _orientationMetrics.normalizedMaxCornerResidual;
             r.borderDistancePixels = _orientationMetrics.minimumBorderDistancePixels;
-#if DJI_APRILTAG_BORDER_48_EXPERIMENT
             FillBorderExperimentDiagnostic(r, pose);
-#endif
-#if DJI_APRILTAG_STALE_JUMP_EXPERIMENT
             FillStaleJumpDiagnostic(r);
-#endif
-#if DJI_APRILTAG_BORDER_RETENTION_EXPERIMENT || DJI_APRILTAG_BORDER_48_EXPERIMENT || DJI_APRILTAG_STALE_JUMP_EXPERIMENT
             FillBorderRetentionDiagnostic(r);
-#endif
             _telemetryValidationLogger.WriteOrientationDiagnostic(r);
             _orientationPreviousTagIds = result.markerIds;
         }
@@ -101,15 +93,9 @@ public sealed partial class DjiBoardVisionProvider
             r.poseValid = true; r.candidate = pose.rotation; r.arrivalTimeNs = arrival;
             r.outcome = "PROMOTED_HIGH_CONFIDENCE";
             r.reason = "EXISTING_PRODUCTION_ADMISSION";
-#if DJI_APRILTAG_BORDER_48_EXPERIMENT
             FillBorderExperimentDiagnostic(r, pose);
-#endif
-#if DJI_APRILTAG_STALE_JUMP_EXPERIMENT
             FillStaleJumpDiagnostic(r);
-#endif
-#if DJI_APRILTAG_BORDER_RETENTION_EXPERIMENT || DJI_APRILTAG_BORDER_48_EXPERIMENT || DJI_APRILTAG_STALE_JUMP_EXPERIMENT
             FillBorderRetentionDiagnostic(r);
-#endif
             _telemetryValidationLogger?.WriteOrientationDiagnostic(r);
         }
         catch (Exception) { }

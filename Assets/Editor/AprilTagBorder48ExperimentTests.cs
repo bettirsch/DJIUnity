@@ -1,14 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using System.Reflection;
 using NUnit.Framework;
-using UnityEditor;
-using UnityEditor.Build;
-using UnityEditor.Build.Reporting;
 using UnityEngine;
-using UnityEngine.Rendering;
 using Object = UnityEngine.Object;
 
 public sealed class AprilTagBorder48ExperimentTests
@@ -34,9 +28,26 @@ public sealed class AprilTagBorder48ExperimentTests
     [Test]
     public void NormalEditorBuild_DoesNotEnableExperiment()
     {
-        Assert.That(DjiAprilTagBorderExperiment.Enabled, Is.False);
+        // Retain the historical test ID; the former experiment is now normal policy.
+        Assert.That(DjiAprilTagBorderExperiment.Enabled, Is.True);
+        Assert.That(Reason(EvaluateNormal(Metrics(51))), Is.Empty);
+        // Explicit offline comparison, not a selectable shipping profile.
         Assert.That(Reason(Evaluate(Metrics(51), false)), Is.EqualTo("BORDER_PROXIMITY"));
         Assert.That(Get("highConfidenceMinimumBorderDistancePixels"), Is.EqualTo(64f));
+    }
+
+    [Test]
+    public void NormalPolicy_MatchesExplicitBorder48AtBoundaryAndKeepsLowerTagGuards()
+    {
+        foreach (var count in new[] { 1, 2, 3, 4 })
+        foreach (var border in new[] { 47.99f, 48f, 51f, 63.99f, 64f })
+        {
+            var metrics = Metrics(border, count);
+            Assert.That(Reason(EvaluateNormal(metrics)), Is.EqualTo(Reason(Evaluate(metrics, true))),
+                $"markerCount={count} border={border}");
+        }
+        Assert.That(Reason(EvaluateNormal(Metrics(47.99f))), Is.EqualTo("BORDER_PROXIMITY"));
+        Assert.That(Reason(EvaluateNormal(Metrics(48f))), Is.Empty);
     }
 
     [TestCase(47.99f, false)]
@@ -79,6 +90,7 @@ public sealed class AprilTagBorder48ExperimentTests
     [Test]
     public void NormalProfile_IsIdenticalRegardlessOfReacquisitionContext()
     {
+        // Historical NormalProfile means the explicit offline 64-pixel baseline only.
         foreach (var count in new[] { 1, 2, 3, 4 })
         foreach (var border in new[] { 20f, 47f, 48f, 51f, 63f, 64f, 300f })
         {
@@ -109,6 +121,9 @@ public sealed class AprilTagBorder48ExperimentTests
     [Test]
     public void ConfirmationAndActualHandoverDwell_AreNotBypassed()
     {
+        // Offline legacy dwell comparison uses the Editor-only knob because this
+        // fixture has no arrival clock or independently validated evidence queue.
+        Set("_validatedTrackingSafetyEnabled", false);
         var mode = typeof(DjiBoardVisionProvider).GetNestedType("VisualReacquisitionMode", BindingFlags.NonPublic);
         Set("_visualReacquisitionMode", Enum.Parse(mode, "PropagatedReacquisition"));
         Set("_shadowPropagationActive", true);
@@ -185,7 +200,10 @@ public sealed class AprilTagBorder48ExperimentTests
                 jump, rotation, .1f, false, float.NaN, false, float.NaN });
 
     private object Evaluate(object metrics, bool enabled) => typeof(DjiBoardVisionProvider)
-        .GetMethod("EvaluateVisualPoseQualityForBorderProfile", Private).Invoke(_board, new[] { metrics, (object)enabled });
+        .GetMethod("EvaluateVisualPoseQualityForAllExperiments", Private)
+        .Invoke(_board, new[] { metrics, (object)enabled, false, false });
+    private object EvaluateNormal(object metrics) => typeof(DjiBoardVisionProvider)
+        .GetMethod("EvaluateVisualPoseQuality", Private).Invoke(_board, new[] { metrics });
     private static string Reason(object evaluation) => (string)evaluation.GetType().GetField("reason").GetValue(evaluation);
     private void Apply(object metrics, object evaluation) => typeof(DjiBoardVisionProvider)
         .GetMethod("UpdateVisualPoseQuality", Private, null, new[] { MetricsType, evaluation.GetType() }, null)
@@ -209,27 +227,6 @@ public sealed class AprilTagBorder48ExperimentTests
 
     public static void BuildDiagnosticApk()
     {
-        var args = Environment.GetCommandLineArgs();
-        int index = Array.IndexOf(args, "-outputPath");
-        if (index < 0 || index + 1 >= args.Length) throw new ArgumentException("Missing -outputPath");
-        var output = Path.GetFullPath(args[index + 1]);
-        if (File.Exists(output)) throw new IOException("Refusing to overwrite APK.");
-        if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.Android || EditorUserBuildSettings.buildAppBundle ||
-            PlayerSettings.GetApplicationIdentifier(NamedBuildTarget.Android) != "com.sok9hu" ||
-            PlayerSettings.GetScriptingBackend(NamedBuildTarget.Android) != ScriptingImplementation.IL2CPP ||
-            PlayerSettings.Android.targetArchitectures != AndroidArchitecture.ARM64 ||
-            (int)PlayerSettings.Android.minSdkVersion != 24 || (int)PlayerSettings.Android.targetSdkVersion != 36 ||
-            !PlayerSettings.GetGraphicsAPIs(BuildTarget.Android).SequenceEqual(new[] { GraphicsDeviceType.OpenGLES3 }))
-            throw new InvalidOperationException("Expected unchanged Android production configuration.");
-        if (PlayerSettings.GetScriptingDefineSymbols(NamedBuildTarget.Android).Contains("DJI_APRILTAG_BORDER_48_EXPERIMENT"))
-            throw new InvalidOperationException("Experiment must not be a persistent project define.");
-        var defines = new[] { "DJI_APRILTAG_BORDER_48_EXPERIMENT" };
-        Directory.CreateDirectory(Path.GetDirectoryName(output));
-        var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions {
-            scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray(),
-            target = BuildTarget.Android, locationPathName = output, options = BuildOptions.None,
-            extraScriptingDefines = defines });
-        if (report.summary.result != BuildResult.Succeeded) throw new Exception("Border experiment APK build failed.");
-        Debug.Log("APRILTAG_BORDER_48_APK_SUCCESS defines=" + string.Join(",", defines) + " path=" + output);
+        CommandLineAndroidBuild.BuildApk();
     }
 }

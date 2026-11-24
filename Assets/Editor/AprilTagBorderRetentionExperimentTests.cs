@@ -3,11 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using NUnit.Framework;
-using UnityEditor;
-using UnityEditor.Build;
-using UnityEditor.Build.Reporting;
 using UnityEngine;
-using UnityEngine.Rendering;
 using Object = UnityEngine.Object;
 
 public sealed class AprilTagBorderRetentionExperimentTests
@@ -56,9 +52,34 @@ public sealed class AprilTagBorderRetentionExperimentTests
     [Test]
     public void NormalBuild_IsDisabledAndPreserves64PixelPolicy()
     {
-        Assert.That(DjiAprilTagBorderRetentionExperiment.Enabled, Is.False);
+        // Historical ID retained; 64 pixels is the offline OFF-policy baseline.
+        Assert.That(DjiAprilTagBorderRetentionExperiment.Enabled, Is.True);
         Assert.That(Reason(Evaluate(Metrics(), retention: false)), Is.EqualTo("BORDER_PROXIMITY"));
+        var normal = typeof(DjiBoardVisionProvider).GetMethod("EvaluateVisualPoseQuality", Private)
+            .Invoke(_board, new[] { Metrics() });
+        Assert.That(Reason(normal), Is.Empty);
+        Assert.That(Get("_retentionEffectiveThresholdPixels"), Is.EqualTo(48f));
         Assert.That(Get("highConfidenceMinimumBorderDistancePixels"), Is.EqualTo(64f));
+    }
+
+    [Test]
+    public void NormalPolicy_AppliesFreshRetentionPosesRatherThanHoldingTheOldVisual()
+    {
+        for (var i = 1; i <= 3; i++)
+        {
+            var timestamp = 1000 + i * 100;
+            var metrics = Metrics(timestamp: timestamp, x: i * .01f);
+            var normal = typeof(DjiBoardVisionProvider).GetMethod("EvaluateVisualPoseQuality", Private)
+                .Invoke(_board, new[] { metrics });
+            Assert.That(Reason(normal), Is.Empty);
+            Apply(metrics, normal);
+            typeof(DjiBoardVisionProvider).GetMethod("PromoteHighConfidenceVisualPose", Private).Invoke(_board,
+                new[] { NativeResult(timestamp), metrics, (object)false, timestamp * Ms });
+            Assert.That(ResolveAndApply().position.x, Is.EqualTo(i * .01f).Within(1e-6f));
+            Assert.That(Get("_currentHighConfidenceVisualTimestampNs"), Is.EqualTo(timestamp * Ms));
+            Assert.That(Get("_holdingVisualAuthorityForBorderlineQuality"), Is.False);
+        }
+        Assert.That(AppliedRecords(), Is.EqualTo(3));
     }
 
     [TestCase(48f)]
@@ -152,6 +173,7 @@ public sealed class AprilTagBorderRetentionExperimentTests
     [Test]
     public void RetentionDisabled_KeepsOriginalTwoHoldsThenBorderDegradation()
     {
+        // Explicit offline policy comparison, not a final-build configuration.
         Step(1100, retention: false); Step(1200, retention: false);
         Assert.That(_board.CurrentVisualPoseQuality, Is.EqualTo(DjiBoardVisionProvider.VisualPoseQuality.HighConfidence));
         Assert.That(Get("_currentHighConfidenceVisualTimestampNs"), Is.EqualTo(1000 * Ms));
@@ -282,8 +304,8 @@ public sealed class AprilTagBorderRetentionExperimentTests
         Assert.That(_board.TryGetRenderCameraFromBoard(2f, out var pose, out var source, out _), Is.True);
         Assert.That(source, Is.EqualTo(DjiRenderPoseSource.Visual));
         typeof(DjiSharedReferenceCubeOverlay).GetMethod("ApplyStandaloneBoardOverlayPose", Private).Invoke(_overlay, new object[] { pose });
-        // The build-only runtime hook calls this exact diagnostic after the
-        // same production camera application; normal Editor flags stay off.
+        // Also exercise the diagnostic directly; the normal runtime hook must
+        // suppress a duplicate application record for the same accepted source.
         typeof(DjiBoardVisionProvider).GetMethod("TraceBorderRetentionVisualApplication", Private).Invoke(_board, new object[] { pose });
         return pose;
     }
@@ -296,27 +318,6 @@ public sealed class AprilTagBorderRetentionExperimentTests
 
     public static void BuildCombinedDiagnosticApk()
     {
-        var args = Environment.GetCommandLineArgs(); var index = Array.IndexOf(args, "-outputPath");
-        if (index < 0 || index + 1 >= args.Length) throw new ArgumentException("Missing -outputPath");
-        var output = Path.GetFullPath(args[index + 1]);
-        if (File.Exists(output)) throw new IOException("Refusing to overwrite APK.");
-        if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.Android || EditorUserBuildSettings.buildAppBundle ||
-            PlayerSettings.GetApplicationIdentifier(NamedBuildTarget.Android) != "com.sok9hu" ||
-            PlayerSettings.GetScriptingBackend(NamedBuildTarget.Android) != ScriptingImplementation.IL2CPP ||
-            PlayerSettings.Android.targetArchitectures != AndroidArchitecture.ARM64 ||
-            (int)PlayerSettings.Android.minSdkVersion != 24 || (int)PlayerSettings.Android.targetSdkVersion != 36 ||
-            !PlayerSettings.GetGraphicsAPIs(BuildTarget.Android).SequenceEqual(new[] { GraphicsDeviceType.OpenGLES3 }))
-            throw new InvalidOperationException("Expected unchanged Android production configuration.");
-        var defines = new[] { "DJI_APRILTAG_BORDER_48_EXPERIMENT", "DJI_APRILTAG_STALE_JUMP_EXPERIMENT",
-            "DJI_APRILTAG_BORDER_RETENTION_EXPERIMENT" };
-        var persistent = PlayerSettings.GetScriptingDefineSymbols(NamedBuildTarget.Android);
-        if (defines.Any(persistent.Contains)) throw new InvalidOperationException("Experiments must remain build-only.");
-        Directory.CreateDirectory(Path.GetDirectoryName(output));
-        var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions {
-            scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray(),
-            target = BuildTarget.Android, locationPathName = output, options = BuildOptions.None,
-            extraScriptingDefines = defines });
-        if (report.summary.result != BuildResult.Succeeded) throw new Exception("Combined experiment build failed.");
-        Debug.Log("APRILTAG_COMBINED_APK_SUCCESS defines=" + string.Join(",", defines) + " path=" + output);
+        CommandLineAndroidBuild.BuildApk();
     }
 }

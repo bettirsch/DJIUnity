@@ -58,3 +58,8 @@ placeholder during packaging. Keep the key out of both repositories.
 
 See [development validation](Docs/DevelopmentValidation.md) for the bridge
 build and optional replay test inputs.
+
+Use `CommandLineAndroidBuild.BuildApk` for the complete normal Release application.
+The accepted AprilTag/reacquisition policies and Android wall shadow no longer
+require candidate defines. Native multi-start is mandatory and the AAR is checked
+before packaging. See [final build configuration](Docs/FINAL_BUILD_CONFIGURATION.md).

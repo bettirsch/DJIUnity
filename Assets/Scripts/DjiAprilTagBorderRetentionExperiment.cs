@@ -4,17 +4,7 @@ using UnityEngine;
 
 public static class DjiAprilTagBorderRetentionExperiment
 {
-    public static bool Enabled
-    {
-        get
-        {
-#if DJI_APRILTAG_BORDER_RETENTION_EXPERIMENT
-            return true;
-#else
-            return false;
-#endif
-        }
-    }
+    public static bool Enabled => true;
 
     public static bool IsEligible(int markerCount, float borderPixels, DjiRenderPoseSource authority,
         bool previousHighConfidence, bool enabled) =>

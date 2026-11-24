@@ -13,7 +13,7 @@ public sealed class HorizontalGnssSmoothingEstimatorTests
 
         var result = estimator.Update(200L * Millisecond, true, Vector2.zero, 200L * Millisecond);
 
-        Assert.That(result.tauSeconds, Is.EqualTo(0.5f));
+        Assert.That(result.tauSeconds, Is.EqualTo(0.25f));
         Assert.That(result.maximumCorrectionSpeedMetersPerSecond, Is.EqualTo(2.5f));
     }
 
@@ -39,7 +39,8 @@ public sealed class HorizontalGnssSmoothingEstimatorTests
 
         var result = estimator.Update(600L * Millisecond, true, new Vector2(1f, 0f), 600L * Millisecond);
 
-        Assert.That(result.smoothedNavigationDelta.x, Is.EqualTo(1f - Mathf.Exp(-1f)).Within(0.0001f));
+        // 500 ms evaluation interval / 250 ms tau = two time constants.
+        Assert.That(result.smoothedNavigationDelta.x, Is.EqualTo(1f - Mathf.Exp(-2f)).Within(0.0001f));
         Assert.That(result.appliedCorrection.x, Is.EqualTo(result.desiredCorrection.x).Within(0.0001f));
     }
 
@@ -109,7 +110,7 @@ public sealed class HorizontalGnssSmoothingEstimatorTests
         estimator.Initialize(100L * Millisecond);
         estimator.Update(200L * Millisecond, true, Vector2.zero, 200L * Millisecond);
 
-        var jitter = estimator.Update(400L * Millisecond, true, new Vector2(0.04f, -0.03f), 400L * Millisecond);
+        var jitter = estimator.Update(400L * Millisecond, true, new Vector2(0.024f, -0.018f), 400L * Millisecond);
 
         Assert.That(jitter.targetAccepted, Is.False);
         Assert.That(jitter.targetRejectedReason, Is.EqualTo("WITHIN_STATIONARY_NOISE_ENVELOPE"));

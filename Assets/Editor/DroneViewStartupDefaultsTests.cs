@@ -68,6 +68,11 @@ public sealed class DroneViewStartupDefaultsTests
 
     private static void AssertDeterministicModes(DjiBoardVisionProvider provider)
     {
+        var providerType = typeof(DjiBoardVisionProvider);
+        const BindingFlags privateFields = BindingFlags.Instance | BindingFlags.NonPublic;
+        Assert.That(providerType.GetField("_validatedTrackingSafetyEnabled", privateFields).GetValue(provider), Is.True);
+        Assert.That(providerType.GetField("allowUnvalidatedRotationPropagationForDeveloperTesting", privateFields), Is.Null,
+            "Normal rotation propagation must not depend on a serialized developer override.");
         Assert.That(
             provider.CurrentHorizontalTranslationRenderMode,
             Is.EqualTo(HorizontalTranslationRenderMode.ShadowOnly));

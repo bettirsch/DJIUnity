@@ -1025,6 +1025,7 @@ public sealed class RotationPropagationTransformTests
     [Test]
     public void RenderPolicy_BlocksUnsafeEnabledModeWithoutOverride()
     {
+        // Offline pure-policy comparison; production supplies validated safety.
         Assert.That(RotationPropagationRenderPolicy.IsEnabledAllowed(
             DjiBoardVisionProvider.RotationPropagationMode.Enabled,
             safeForRotationOnlyPropagation: false,
@@ -1043,10 +1044,19 @@ public sealed class RotationPropagationTransformTests
     [Test]
     public void RenderPolicy_AllowsDeveloperOverrideForEnabledMode()
     {
+        // Historical offline helper contract, not a serialized production override.
         Assert.That(RotationPropagationRenderPolicy.IsEnabledAllowed(
             DjiBoardVisionProvider.RotationPropagationMode.Enabled,
             safeForRotationOnlyPropagation: false,
             developerOverride: true), Is.True);
+        Assert.That(RotationPropagationRenderPolicy.IsEnabledAllowed(
+            DjiBoardVisionProvider.RotationPropagationMode.Disabled,
+            safeForRotationOnlyPropagation: true,
+            developerOverride: true), Is.False);
+        Assert.That(RotationPropagationRenderPolicy.IsEnabledAllowed(
+            DjiBoardVisionProvider.RotationPropagationMode.ShadowDiagnostic,
+            safeForRotationOnlyPropagation: true,
+            developerOverride: true), Is.False);
     }
 
     [Test]

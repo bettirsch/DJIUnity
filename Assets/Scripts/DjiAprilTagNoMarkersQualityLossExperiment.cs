@@ -2,17 +2,7 @@ using UnityEngine;
 
 public static class DjiAprilTagNoMarkersQualityLossExperiment
 {
-    public static bool Enabled
-    {
-        get
-        {
-#if DJI_APRILTAG_NO_MARKERS_QUALITY_LOSS_EXPERIMENT
-            return true;
-#else
-            return false;
-#endif
-        }
-    }
+    public static bool Enabled => true;
 }
 
 public enum NoMarkersQualityLossDecision
